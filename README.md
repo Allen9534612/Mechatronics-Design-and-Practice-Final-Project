@@ -46,4 +46,4 @@
 本專案程式使用 `Google` 風格撰寫
 
 - 可在 VS Code 使用命令列，或者按下 `Shift + Alt + F` 排版。另外，儲存檔案時也會自動排版。
-- 鼠標懸浮在 Warnings 時，按下 `Ctrl + .` 可檢視 linter 提供的快速修正選項。
+- 鼠標懸浮在 Warnings 時，按下 `Ctrl + .` 可檢視 Linter 提供的快速修正選項。
