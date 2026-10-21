@@ -21,7 +21,7 @@
 
 1. 複製專案到本地端：
    ```bash
-   git clone [git@github.com:Allen9534612/Mechatronics-Design-and-Practice-Final-Project.git](git@github.com:Allen9534612/Mechatronics-Design-and-Practice-Final-Project.git)
+   git clone git@github.com:Allen9534612/Mechatronics-Design-and-Practice-Final-Project.git
 
 2. 安裝 Python 函式庫：
    ```bash
