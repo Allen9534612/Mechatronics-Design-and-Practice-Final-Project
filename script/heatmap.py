@@ -1,3 +1,5 @@
+# press c to exit program, 4 and 8 to change resolution.
+
 import sys
 
 import pygame
