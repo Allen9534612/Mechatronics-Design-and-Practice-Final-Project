@@ -4,13 +4,19 @@
 
 ## 建置環境與依賴
 
+### 硬體設備
+
 - NodeMCU-32s
 - VL53L7CX
 - MG996R Servo Motor
+
+### 軟體環境
+
 - Python 3.13
 - Python Package:
     - pyserial
     - pygame
+    
 - Visual Studio Code
 - VS Code Extension:
     - PlatformIO
