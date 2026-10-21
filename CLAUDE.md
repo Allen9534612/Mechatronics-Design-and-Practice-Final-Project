@@ -54,3 +54,13 @@ There is no test suite or linter configured in this repo.
 - 2026-10-16：建立 CLAUDE.md，記錄專案架構與建置指令；新增工作規則（中文回覆、開發前閱讀本檔、開發歷程記錄於此）。
 - 2026-10-16：新增「專案介紹」章節，記錄平衡球平台的系統架構與資料流（紅外線感測陣列 → 球位置 → 平台傾斜角度 → 三顆馬達角度 → 伺服馬達控制）。
 - 2026-10-16：搭出程式骨架，把 5 階段資料流拆成對應模組：新增 `include/Config.h`（共用設定/腳位/參數，皆為 TODO 佔位值）、`lib/IRSensorArray`、`lib/BallPositionEstimator`、`lib/BalanceController`（PID）、`lib/PlatformKinematics`（逆向運動學，暫用簡化近似公式）；補上原本缺少的 `lib/ServoMotor/ServoMotor.h`（並把檔名從 `servoMotor.h` 改成與 `#include "ServoMotor.h"` 大小寫一致的 `ServoMotor.h`，避免在大小寫敏感的檔案系統上編譯失敗）；`src/main.cpp` 串接整條 pipeline（讀取感測 → 算球位置 → PID 算傾斜角 → 逆向運動學算三馬達角度 → 輸出到伺服馬達）。所有演算法目前都是可編譯執行的佔位邏輯，待確認硬體規格（感測器型號/佈局、平台機構幾何）後逐一替換成正確實作。
+- 2026-10-16：確定實際感測器為 **VL53L7CX**（ST 的 8x8 多區域 ToF 測距感測器，I2C 介面），取代目前 `lib/IRSensorArray` 骨架假設的「多顆類比紅外線感測器」設計。待辦事項：
+  - `lib/IRSensorArray` 需改寫為透過 I2C 讀取 VL53L7CX 的 8x8（64 點）距離矩陣，`Config.h` 的 `IR_SENSOR_COUNT`/`IR_SENSOR_PINS` 腳位設計需移除/替換成 I2C 腳位設定。
+  - `lib/BallPositionEstimator` 的加權平均佔位演算法需重新設計，改成基於 8x8 距離矩陣估算球位置。
+  - 參考的 `stm32duino/VL53L7CX` repo 是 STM32 平台專用，esp32 環境不能直接用，需另找/自製 ESP32 相容的 driver（或改包 ST 官方 ULD C driver）。
+- 2026-10-16：改寫 `lib/IRSensorArray`，改為透過 I2C 驅動 VL53L7CX（8x8=64 區域 ToF 測距）：
+  - 查證結果：`stm32duino/VL53L7CX` library 底層只用 `TwoWire`/`pinMode`/`digitalWrite`/`delay()` 等標準 Arduino API，沒有呼叫任何 STM32 HAL 函式，所以雖然 `library.properties` 的 `architectures` 只標示 STM32/SAM，實際上可以在 ESP32（Arduino core）上編譯運作。因此**更正**前一則記錄裡「該 library 不能用在 ESP32，需另找/自製 driver」的結論；改為直接把它加進 `platformio.ini` 的 `esp32` 環境 `lib_deps`（用 GitHub URL `https://github.com/stm32duino/VL53L7CX.git` 引入，避開 PlatformIO 註冊表 library 名稱比對問題）。
+  - `Config.h`：移除 `IR_SENSOR_COUNT`/`IR_SENSOR_PINS`，改為 `TOF_I2C_SDA_PIN`/`TOF_I2C_SCL_PIN`/`TOF_I2C_FREQ_HZ`/`TOF_LPN_PIN`/`TOF_I2C_RST_PIN`/`TOF_RANGING_FREQUENCY_HZ`（皆為 TODO 佔位值，待依實際接線調整；LPN 是感測器電源致能腳位，大多數模組都會接出）。
+  - `IRSensorArray` 類別名稱保留（維持 pipeline 其他模組介面相容），但內部已改為包裝 `VL53L7CX` 物件：`begin()` 初始化 I2C 與感測器（解析度設為 8x8、設定更新頻率、開始量測），`update()` 檢查資料是否就緒並讀取 `VL53L7CX_ResultsData`，`count()` 回傳 64，`reading(index)` 回傳該區域距離（mm），新增 `readingValid(index)` 回傳該區域量測是否有效（`target_status` 為 5 或 9）。
+  - **尚未處理**：`lib/BallPositionEstimator` 目前仍假設感測器均勻分布在圓周上（用索引算角度、讀值當權重做加權平均），對 8x8 距離矩陣來說已經不合理，下一步需要重新設計成依 8x8 區域網格與 `readingValid()` 來估算球位置。
+  - 因為目前環境沒有安裝 PlatformIO CLI，這次改動**未實際編譯驗證**，之後建議在有 `pio`/VS Code PlatformIO 擴充套件的環境跑一次 `pio run -e esp32` 確認。
