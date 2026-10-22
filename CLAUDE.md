@@ -31,6 +31,7 @@ This is a PlatformIO project (`platformio.ini` at the repo root). Use the Platfo
 - Upload to board: `pio run -e esp32 -t upload`
 - Open serial monitor (115200 baud, set via `monitor_speed` for esp32): `pio device monitor`
 - Clean build artifacts: `pio run -t clean`
+- 監控 GUI（OpenGL，可縮放）：`pip install -r script/requirements.txt` 後執行 `python script/heatmap.py`（自動偵測序列埠）、`--port COM5` 指定埠、`--demo` 用模擬資料（不接硬體）、`--snapshot out.png` 存一張畫面後離開（除錯用）。
 
 There is no test suite or linter configured in this repo.
 
@@ -47,6 +48,8 @@ There is no test suite or linter configured in this repo.
   6. `lib/ServoMotor`：透過 PCA9685 輸出 PWM，`setAngle(channel, angle)`。
   `main.cpp` 的 `modelToServo()` 依 `servoCal`（neutral/gain/offset/限幅）把模型角轉成伺服角。`maxTilt = min(運動學可達最大傾角, MAX_TILT_DEG)`。
 - 序列埠：`DATA,<N>,<N*N 個距離>,<gridX>,<gridY>` 供 `script/heatmap.py` 使用，**gridX/gridY 維持格點座標、無球為 -1**；指令列表輸入 `?` 查看。
+- 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
+- `script/heatmap.py`：moderngl（OpenGL 3.3）+ pygame 視窗的監控 GUI，可任意縮放（版面依視窗大小等比例縮放）。左側為資料流數值（感測器 → 估測 → PID → 伺服），中間為距離熱圖/球位置/傾斜方向/韌體訊息，右側為可調項按鈕（解析度、自動/回水平、PID 增益、目標點、高度、傾斜測試、指令輸入框）與滑鼠懸停提示。背景執行緒用 pyserial 收發（斷線自動重連），按鈕送出的就是韌體的序列埠指令（`4`/`8`/`r`/`l`/`p`/`g`/`h`/`t`…）；顯示值一律以韌體回報的 STAT 為準。GUI 內的 `SERVO_MIN_DEG/MAX_DEG`、`MIN_DISTANCE` 需與 Config.h 一致。
 - `test/raw.cpp`：獨立的感測器原始資料測試程式（不屬於主 build）。
 
 ## 開發歷程
@@ -77,3 +80,4 @@ There is no test suite or linter configured in this repo.
   - 驗證：`pio run -e esp32` 成功、無警告；host 端 mock 測試 1137 項全數通過（含估測器真值比對、雜訊、mm 換算、閉迴路球滾動模擬收斂到中心）。
   - 仍待處理：`TOF_FOV_DEG`、感測器安裝方向與 `SENSOR_FLIP/ROTATION`、實際訊號形狀（目前以高斯球模擬）、PID 增益都需上機校正；`IRSensorArray::halt()` 找不到感測器時仍會無限迴圈。
 - 2026-10-22：更正 `TOF_FOV_DEG` 為 60（VL53L7CX 單邊 60°x60°、對角約 90°；先前誤用 45°，會讓 mm 換算偏小約 25%）。
+- 2026-10-22：整理 git（3 個 commit：設定集中化、估測器 mm 化、文件）。新增 `STAT` 遙測行（`main.cpp` 的 `printStat()`、`Config.h` 的 `STAT_PERIOD_MS`），並重寫 `script/heatmap.py` 為 moderngl/OpenGL 的可縮放 GUI（左：資料流數值；右：可調項按鈕與提示；pyserial 背景執行緒收發；`--demo` 模擬模式；`--snapshot` 截圖）。新增 `script/requirements.txt`。驗證：用 pygame 事件模擬 19 項點擊/鍵盤/滾輪/縮放操作，確認各按鈕送出正確指令；把 host 端編譯的真實韌體輸出（DATA/STAT）餵給 GUI 解析器，格式吻合；韌體 mock 測試 1137 項與 `pio run -e esp32` 皆通過。已知注意：4x4 / 60 Hz 時 DATA 約 8 KB/s，加上 STAT 與狀態列已接近 115200 baud 上限（約 11.5 KB/s），若序列埠出現延遲/掉資料，考慮降低 4x4 頻率、提高 baud（需同步改 `SERIAL_BAUD`、`monitor_speed`、heatmap `--baud`）或移除人類可讀狀態列。GUI 尚未在真實硬體上驗證。
