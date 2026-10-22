@@ -1309,11 +1309,7 @@ class App:
                 gx0 + side * 0.08, my - 34 * s, side * 0.84, 68 * s, 10 * s, BG, 0.88
             )
             r.text("沒有有效區域", mx, my - 12 * s, 15 * s, TEXT, "mc", bold=True)
-            why = (
-                "8×8 在近距離可能偵測不到，請改用 4×4"
-                if n == 8
-                else "目標超出距離或訊號強度的篩選範圍"
-            )
+            why = "沒有區域通過距離、訊號強度或狀態碼的篩選"
             r.text(why, mx, my + 12 * s, 12 * s, DIM, "mc")
 
         ly = gy0 + side + 12 * s
