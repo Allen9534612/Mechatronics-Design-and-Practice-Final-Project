@@ -26,10 +26,10 @@ static constexpr uint8_t TOF_FREQ_8X8_HZ = 15;
 static constexpr float TOF_FOV_DEG = 60.0f;
 
 // 區域有效性篩選：距離 (mm) 與 signal_per_spad。
-static constexpr int TOF_FILTER_MIN_DISTANCE = 150;
-static constexpr int TOF_FILTER_MAX_DISTANCE = 800;
+static constexpr int TOF_FILTER_MIN_DISTANCE = 50;
+static constexpr int TOF_FILTER_MAX_DISTANCE = 500;
 static constexpr int TOF_FILTER_MIN_STRENGTH = 1;
-static constexpr int TOF_FILTER_MAX_STRENGTH = 4000;
+static constexpr int TOF_FILTER_MAX_STRENGTH = 1000;
 
 // 感測器座標轉平台座標：先翻轉，再逆時針旋轉。
 static constexpr float SENSOR_ROTATION_DEG = 0.0f;
