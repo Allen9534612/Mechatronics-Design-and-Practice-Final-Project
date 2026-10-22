@@ -205,6 +205,10 @@ class Telemetry:
         self.connected = False
 
     def add_log(self, text):
+        # 序列埠雜訊可能夾帶空字元等控制字元，繪製文字時會拋出例外。
+        text = "".join(ch for ch in text if ch.isprintable())
+        if not text:
+            return
         with self.lock:
             self.log.append(text)
 
@@ -741,6 +745,7 @@ class Renderer:
 
     def text(self, s, x, y, size, col=TEXT, anchor="tl", bold=False, a=1.0):
         """繪製文字並回傳寬度。anchor 第一字為垂直 t/m/b，第二字為水平 l/c/r。"""
+        s = s.replace("\x00", "")
         if not s:
             return 0
         f = self.font(size, bold)
