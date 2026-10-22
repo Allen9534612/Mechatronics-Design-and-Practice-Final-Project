@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections import deque
 
 # 必須在 pygame 初始化前設定，否則 Windows 會把視窗位圖放大而變模糊。
@@ -36,6 +37,10 @@ BAUD_RATE = 115200
 SERVO_MIN_DEG = 40.0
 SERVO_MAX_DEG = 140.0
 SERVO_CHANNELS = (0, 1, 2)
+# 平台高度範圍（mm），由 PlatformKinematics 的 minHeight/maxHeight 算出，
+# 需與機構尺寸一致；超出範圍韌體會拒絕。
+HEIGHT_MIN_MM = 61.0
+HEIGHT_MAX_MM = 102.0
 MIN_SPAN_MM = 40  # 色階最小跨距，避免畫面接近平坦時對比被放大成雜訊
 
 # 欄位順序需與 src/main.cpp 的 printStat() 一致。
@@ -317,7 +322,9 @@ class SerialLink:
                     time.sleep(1.0)
                     continue
                 try:
-                    self.ser = serial.Serial(port, self.baud, timeout=0.1)
+                    self.ser = serial.Serial(
+                        port, self.baud, timeout=0.1, write_timeout=0.5
+                    )
                     tel.status, tel.connected = f"已連線 {port}", True
                     tel.add_log(f"[已開啟 {port}]")
                 except serial.SerialException as e:
@@ -592,6 +599,8 @@ def find_font_paths():
 class Renderer:
     """批次繪製色塊、線條與圓；文字轉成貼圖後以 OpenGL 繪出。"""
 
+    CACHE_LIMIT = 4000  # 文字貼圖快取上限（每幀開頭檢查，約數十 MB 顯示記憶體）。
+
     def __init__(self, ctx):
         self.ctx = ctx
         self.prog = ctx.program(vertex_shader=VS_COLOR, fragment_shader=FS_COLOR)
@@ -615,6 +624,11 @@ class Renderer:
         self.ctx.clear(*rgba(BG))
         self.verts.clear()
         self.texts.clear()
+        # 只在幀開頭整理快取；繪製途中釋放貼圖會讓本幀已排入的文字失效。
+        if len(self.tex_cache) > self.CACHE_LIMIT:
+            for tex, _, _ in self.tex_cache.values():
+                tex.release()
+            self.tex_cache.clear()
 
     def _tri(self, pts, col):
         for x, y in pts:
@@ -733,10 +747,6 @@ class Renderer:
         key = (s, round(size), bold)
         ent = self.tex_cache.get(key)
         if ent is None:
-            if len(self.tex_cache) > 800:
-                for t, _, _ in self.tex_cache.values():
-                    t.release()
-                self.tex_cache.clear()
             surf = f.render(s, True, (255, 255, 255))
             w, h = surf.get_size()
             tex = self.ctx.texture((w, h), 4, pygame.image.tostring(surf, "RGBA"))
@@ -1024,6 +1034,10 @@ class App:
                 ui.clicks.append(e.pos)
                 ui.down = True
             elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+                ui.down = False
+                ui.press_id = None
+            elif e.type in (pygame.WINDOWFOCUSLOST, pygame.WINDOWLEAVE):
+                # 放開滑鼠的事件可能送不到視窗，避免按住連發卡住。
                 ui.down = False
                 ui.press_id = None
             elif e.type == pygame.MOUSEWHEEL:
@@ -1440,14 +1454,16 @@ class App:
             enabled=ok,
         )
         if dl and ok:
-            nh = round(hv + dl, 1)
-            self.set_ov("height", nh)
-            self.link.send(f"h {nh:.1f}")
+            nh = min(max(round(hv + dl, 1), HEIGHT_MIN_MM), HEIGHT_MAX_MM)
+            if nh != hv:
+                self.set_ov("height", nh)
+                self.link.send(f"h {nh:.1f}")
         y += h3 + 10 * s
 
         h4 = 34 * s + 2 * (rh + gap) + 28 * s
         yy = self.card(bx, y, iw, h4, "傾斜測試")
         mt = stat["max_tilt"] if ok else 15.0
+        self.test_theta = min(self.test_theta, mt)
         dl = ui.stepper(
             "th",
             (ix, yy, iiw, rh),
@@ -1610,6 +1626,14 @@ def main():
         app = App(link, tel, size, gpu_info, args.snapshot, args.frames)
         print(f"OpenGL: {app.gl_renderer}")
         app.run()
+    except Exception:
+        # pythonw 啟動時沒有主控台，崩潰原因寫入檔案方便查看。
+        log = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "heatmap_crash.log"
+        )
+        with open(log, "w", encoding="utf-8") as f:
+            f.write(traceback.format_exc())
+        raise
     finally:
         link.stop()
 
