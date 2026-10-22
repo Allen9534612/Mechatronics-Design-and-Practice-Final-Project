@@ -5,23 +5,11 @@
 #include <Wire.h>
 #include <vl53l7cx_class.h>
 
-// LPn, INT 不需要接
-#define SDA_PIN 22
-#define SCL_PIN 21
-#define SENSOR_I2C_ADDRESS 0x29
-#define I2C_CLOCK_SPEED 400000
-
-#define MAX_GRID_SIZE 8
-
-#define FILTER_MIN_DISTANCE 150
-#define FILTER_MAX_DISTANCE 800
-
-#define FILTER_MIN_STRENGTH 1
-#define FILTER_MAX_STRENGTH 4000
+#include "Config.h"
 
 class IRSensorArray {
 public:
-    int current_grid_size = 4;
+    int current_grid_size = TOF_DEFAULT_GRID_SIZE;
 
     IRSensorArray();
     void begin();

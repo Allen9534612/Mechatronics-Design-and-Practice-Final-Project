@@ -1,6 +1,11 @@
 #include "ServoMotor.h"
 
-ServoMotor::ServoMotor(uint8_t address) : pwm(address), i2cAddress(address) {}
+ServoMotor::ServoMotor(uint8_t address) : pwm(address), i2cAddress(address) {
+    for (int i = 0; i < 16; i++) {
+        pulseMin[i] = SERVO_MIN_US;
+        pulseMax[i] = SERVO_MAX_US;
+    }
+}
 
 bool ServoMotor::begin(uint8_t sdaPin, uint8_t sclPin, uint16_t frequency) {
     Wire.begin(sdaPin, sclPin);

@@ -1,6 +1,6 @@
 #include "IRSensorArray.h"
 
-IRSensorArray::IRSensorArray() : sensor(&Wire, -1) {}
+IRSensorArray::IRSensorArray() : sensor(&Wire, TOF_LPN_PIN) {}
 
 void IRSensorArray::halt(const char* msg, int status) {
     Serial.printf("%s (status=%d)\n", msg, status);
@@ -15,11 +15,11 @@ void IRSensorArray::changeResolution(int new_size) {
 
     if (new_size == 4) {
         sensor.vl53l7cx_set_resolution(VL53L7CX_RESOLUTION_4X4);
-        sensor.vl53l7cx_set_ranging_frequency_hz(60);
+        sensor.vl53l7cx_set_ranging_frequency_hz(TOF_FREQ_4X4_HZ);
         current_grid_size = 4;
     } else if (new_size == 8) {
         sensor.vl53l7cx_set_resolution(VL53L7CX_RESOLUTION_8X8);
-        sensor.vl53l7cx_set_ranging_frequency_hz(15);
+        sensor.vl53l7cx_set_ranging_frequency_hz(TOF_FREQ_8X8_HZ);
         current_grid_size = 8;
     }
 
@@ -29,32 +29,37 @@ void IRSensorArray::changeResolution(int new_size) {
 void IRSensorArray::begin() {
     Serial.println("初始化 VL53L7CX 韌體中...");
 
-    Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(I2C_CLOCK_SPEED);
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(I2C_FREQ_HZ);
 
     sensor.begin();
 
-    Wire.beginTransmission(SENSOR_I2C_ADDRESS);
+    Wire.beginTransmission(TOF_I2C_ADDRESS);
     int bus_status = Wire.endTransmission();
     if (bus_status != 0) {
         Serial.printf("在 SDA=GPIO%d / SCL=GPIO%d 找不到 I2C 裝置 0x%02X\n",
-                      SDA_PIN, SCL_PIN, SENSOR_I2C_ADDRESS);
+                      I2C_SDA_PIN, I2C_SCL_PIN, TOF_I2C_ADDRESS);
         halt("請檢查電源與接線", bus_status);
     }
 
     Serial.printf("在 SDA=GPIO%d / SCL=GPIO%d 偵測到 I2C 裝置 0x%02X\n",
-                  SDA_PIN, SCL_PIN, SENSOR_I2C_ADDRESS);
+                  I2C_SDA_PIN, I2C_SCL_PIN, TOF_I2C_ADDRESS);
 
     int status = sensor.init_sensor();
     if (status != 0) halt("找不到感測器或韌體載入失敗", status);
     Serial.println("成功找到裝置");
 
-    if (sensor.vl53l7cx_set_resolution(VL53L7CX_RESOLUTION_4X4) != 0)
+    const bool use8x8 = current_grid_size == 8;
+    if (sensor.vl53l7cx_set_resolution(use8x8 ? VL53L7CX_RESOLUTION_8X8
+                                              : VL53L7CX_RESOLUTION_4X4) != 0)
         halt("設定解析度失敗", 0);
-    if (sensor.vl53l7cx_set_ranging_frequency_hz(60) != 0)
+    if (sensor.vl53l7cx_set_ranging_frequency_hz(
+            use8x8 ? TOF_FREQ_8X8_HZ : TOF_FREQ_4X4_HZ) != 0)
         halt("設定頻率失敗", 0);
 
-    Serial.println("模式：預設 4x4 解析度，頻率 60Hz");
+    Serial.printf("模式：預設 %dx%d 解析度，頻率 %dHz\n", current_grid_size,
+                  current_grid_size,
+                  use8x8 ? TOF_FREQ_8X8_HZ : TOF_FREQ_4X4_HZ);
 
     if (sensor.vl53l7cx_start_ranging() != 0) halt("開始測量失敗", 0);
     Serial.println("開始測量");
@@ -86,10 +91,10 @@ bool IRSensorArray::readData(float grid_strength[MAX_GRID_SIZE][MAX_GRID_SIZE],
                         uint32_t strength = results.signal_per_spad[index];
                         uint8_t status = results.target_status[index];
 
-                        if (dist >= FILTER_MIN_DISTANCE &&
-                            dist <= FILTER_MAX_DISTANCE &&
-                            strength >= FILTER_MIN_STRENGTH &&
-                            strength <= FILTER_MAX_STRENGTH &&
+                        if (dist >= TOF_FILTER_MIN_DISTANCE &&
+                            dist <= TOF_FILTER_MAX_DISTANCE &&
+                            strength >= TOF_FILTER_MIN_STRENGTH &&
+                            strength <= TOF_FILTER_MAX_STRENGTH &&
                             (status == 5 || status == 9)) {
                             if (dist > furthest_distance) {
                                 furthest_distance = dist;

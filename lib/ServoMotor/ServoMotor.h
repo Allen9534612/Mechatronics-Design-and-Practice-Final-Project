@@ -5,14 +5,16 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "Config.h"
+
 class ServoMotor {
 public:
     // 建構子：設定 PCA9685 I2C 位址
-    explicit ServoMotor(uint8_t address = 0x40);
+    explicit ServoMotor(uint8_t address = PCA9685_ADDRESS);
 
     // 初始化 PCA9685
-    bool begin(uint8_t sdaPin = 21, uint8_t sclPin = 22,
-               uint16_t frequency = 50);
+    bool begin(uint8_t sdaPin = I2C_SDA_PIN, uint8_t sclPin = I2C_SCL_PIN,
+               uint16_t frequency = SERVO_PWM_FREQ_HZ);
 
     // 控制指定 Channel 的角度
     bool setAngle(uint8_t channel, float angle);
@@ -40,14 +42,11 @@ private:
     uint16_t lastTicks[16] = {0};
 
     // 必須與 setPWMFreq() 使用的頻率一致
-    uint16_t pwmFrequency = 50;
+    uint16_t pwmFrequency = SERVO_PWM_FREQ_HZ;
 
     // 各 Channel 的預設脈波範圍
-    uint16_t pulseMin[16] = {500, 500, 500, 500, 500, 500, 500, 500,
-                             500, 500, 500, 500, 500, 500, 500, 500};
-
-    uint16_t pulseMax[16] = {2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
-                             2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500};
+    uint16_t pulseMin[16];
+    uint16_t pulseMax[16];
 };
 
 #endif

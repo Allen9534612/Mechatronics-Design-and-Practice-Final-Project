@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <math.h>
 
+#include "Config.h"
+
 // 三軸平台逆向運動學（移植自 I-M-Robotics-Lab/Ball-Balancing-Robot 的
 // robotKinematics.py）
 //
@@ -16,10 +18,11 @@
 // 長度單位：mm（原專案為 cm，數值已乘以 10）
 class PlatformKinematics {
 public:
-    PlatformKinematics(double topRadius = 71.25,   // lp：上盤球關節半徑
-                       double topArm = 62.0,       // l1：連桿（上臂）長度
-                       double bottomArm = 45.0,    // l2：伺服擺臂（下臂）長度
-                       double baseRadius = 40.0);  // lb：伺服轉軸半徑
+    // 預設值取自 Config.h
+    PlatformKinematics(double topRadius = PLATFORM_TOP_RADIUS_MM,     // lp：上盤球關節半徑
+                       double topArm = PLATFORM_TOP_ARM_MM,           // l1：連桿（上臂）長度
+                       double bottomArm = PLATFORM_BOTTOM_ARM_MM,     // l2：伺服擺臂（下臂）長度
+                       double baseRadius = PLATFORM_BASE_RADIUS_MM);  // lb：伺服轉軸半徑
 
     // 平台中心可用的最大、最小高度
     double maxHeight() const;
