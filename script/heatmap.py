@@ -1046,7 +1046,7 @@ class App:
                 self.cmd_text += e.unicode
             return
         k = e.key
-        if k in (pygame.K_ESCAPE, pygame.K_c):
+        if k == pygame.K_ESCAPE:
             self.running = False
         elif k in (pygame.K_4, pygame.K_KP4):
             self.link.send("4")
