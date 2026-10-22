@@ -50,6 +50,8 @@ struct BallReading {
 
 BallReading manualBall = {false, 0.0f, 0.0f};
 BallReading irBall = {false, 0.0f, 0.0f};
+float lastDistMm = 0.0f;    // 最近一次估測的球附近平均距離（遙測用）
+int lastValidZones = 0;     // 最近一次畫面的有效區域數（遙測用）
 
 // =====================================================================
 // 球位置來源
@@ -149,6 +151,20 @@ void printStatus() {
 }
 
 // 把一行指令切成字詞（空白或逗號分隔）
+// 機器可讀的遙測行，給 script/heatmap.py 顯示整條資料流：
+// STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,
+//      maxTilt,distMm,validZones,integX,integY
+// mode：0 = PID 自動、1 = 指定傾角、2 = 直接角度；x,y 為平台座標（mm）
+void printStat(bool present, float px, float py) {
+    Serial.printf(
+        "STAT,%d,%d,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.4f,%.4f,%.4f,%.1f,"
+        "%.1f,%.1f,%.1f,%.1f,%d,%.2f,%.2f\n",
+        (int)mode, present ? 1 : 0, px, py, tiltTheta, tiltPhi, lastServo[0],
+        lastServo[1], lastServo[2], pid.kp, pid.ki, pid.kd, targetX, targetY,
+        height, maxTilt, lastDistMm, lastValidZones, pid.integralX(),
+        pid.integralY());
+}
+
 int splitTokens(char* line, char* tokens[], int maxTokens) {
     int n = 0;
     char* p = strtok(line, " ,\t");
@@ -484,6 +500,8 @@ void loop() {
 
             // 球位置（mm，感測器視野中心為原點）交給後面的 PID
             irBall.present = est.valid;
+            lastDistMm = est.distMm;
+            lastValidZones = valid_zone_count;
             if (est.valid) {
                 irBall.x = est.xMm;
                 irBall.y = est.yMm;
@@ -510,6 +528,7 @@ void loop() {
     }
 
     static uint32_t lastControl = 0;
+    static uint32_t lastStat = 0;
     static uint32_t lastPrint = 0;
     uint32_t now = millis();
 
@@ -518,17 +537,23 @@ void loop() {
     float dt = (now - lastControl) / 1000.0f;
     lastControl = now;
 
-    // 手動模式不跑連續 PID（每次輸入在 setBall() 裡算一次就停）
-    if (!USE_IR_SENSOR) return;
-
-    // 下了 t / l / a 指令後暫停自動控制，輸入 r 恢復
-    if (mode != MODE_BALL) return;
-
     BallReading ball;
     bool present = readBallPosition(ball);
 
     float px = 0, py = 0;
     if (present) sensorToPlatform(ball.x, ball.y, px, py);
+
+    // 不論模式都送遙測，讓 GUI 隨時看得到目前狀態
+    if (now - lastStat >= STAT_PERIOD_MS) {
+        lastStat = now;
+        printStat(present, px, py);
+    }
+
+    // 手動模式不跑連續 PID（每次輸入在 setBall() 裡算一次就停）
+    if (!USE_IR_SENSOR) return;
+
+    // 下了 t / l / a 指令後暫停自動控制，輸入 r 恢復
+    if (mode != MODE_BALL) return;
 
     pid.update(present, px, py, targetX, targetY, dt, maxTilt, tiltTheta,
                tiltPhi);
