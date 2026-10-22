@@ -6,41 +6,35 @@
 
 #include "Config.h"
 
-// 三軸平台逆向運動學（移植自 I-M-Robotics-Lab/Ball-Balancing-Robot 的
-// robotKinematics.py）
+// 三軸平台逆向運動學，移植自 I-M-Robotics-Lab/Ball-Balancing-Robot
+// 的 robotKinematics.py（長度單位改為 mm）。
 //
-// 座標系（從上往下看，Z 軸朝上）：
-//   腳 2（A2/B2）在 +X 軸上（0 度）
-//   腳 1（A1/B1）在 120 度
-//   腳 3（A3/B3）在 240 度
-//   三隻腳依逆時針排列
-//
-// 長度單位：mm（原專案為 cm，數值已乘以 10）
+// 俯視、Z 軸朝上，三隻腳逆時針排列：腳 2 在 +X 軸（0 度）、腳 1 在 120 度、
+// 腳 3 在 240 度。
 class PlatformKinematics {
 public:
-    // 預設值取自 Config.h
-    PlatformKinematics(double topRadius = PLATFORM_TOP_RADIUS_MM,     // lp：上盤球關節半徑
-                       double topArm = PLATFORM_TOP_ARM_MM,           // l1：連桿（上臂）長度
-                       double bottomArm = PLATFORM_BOTTOM_ARM_MM,     // l2：伺服擺臂（下臂）長度
-                       double baseRadius = PLATFORM_BASE_RADIUS_MM);  // lb：伺服轉軸半徑
+    // 參數預設值取自 Config.h：lp 上盤球關節半徑、l1 連桿長度、l2 伺服擺臂
+    // 長度、lb 伺服轉軸半徑。
+    PlatformKinematics(double topRadius = PLATFORM_TOP_RADIUS_MM,
+                       double topArm = PLATFORM_TOP_ARM_MM,
+                       double bottomArm = PLATFORM_BOTTOM_ARM_MM,
+                       double baseRadius = PLATFORM_BASE_RADIUS_MM);
 
-    // 平台中心可用的最大、最小高度
+    // 平台中心的可用高度範圍。
     double maxHeight() const;
     double minHeight() const;
 
-    // 以法向量 (a, b, c) 與高度 h 求三顆伺服的「模型角度」（度）
-    // 模型角度 = 90 - 擺臂與水平外側方向的夾角，與原專案 controller.py 相同
+    // 以法向量 (a, b, c) 與高度 h 求三顆伺服的模型角（度）。模型角 = 90 - 擺臂
+    // 與水平外側方向的夾角。姿態超出機構可達範圍時回傳 false。
     bool solveVector(double a, double b, double c, double h,
                      float modelDeg[3]) const;
 
-    // 以球座標指定姿態：
-    //   thetaDeg = 平台傾斜角（法向量與 Z 軸夾角）
-    //   phiDeg   = 傾斜方向；平台在 phi 方向那一側往「下」傾
+    // 以球座標指定姿態：thetaDeg 為傾角，phiDeg 為傾斜方向（平台往該方向那一
+    // 側下傾）。
     bool solveSpherical(float thetaDeg, float phiDeg, float h,
                         float modelDeg[3]) const;
 
-    // 二分搜尋：在高度 h 下，任何方向都解得出來的最大傾角（度），並保留 0.5
-    // 度餘裕
+    // 高度 h 下任何方向都解得出來的最大傾角（度），已扣除 0.5 度餘裕。
     float computeMaxTilt(float h) const;
 
 private:

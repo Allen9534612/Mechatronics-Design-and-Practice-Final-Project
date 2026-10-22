@@ -10,13 +10,13 @@ ServoMotor::ServoMotor(uint8_t address) : pwm(address), i2cAddress(address) {
 bool ServoMotor::begin(uint8_t sdaPin, uint8_t sclPin, uint16_t frequency) {
     Wire.begin(sdaPin, sclPin);
 
-    // 確認 I2C 上真的有 PCA9685（pwm.begin() 本身不會檢查）
+    // pwm.begin() 不檢查裝置是否存在，所以先探測。
     Wire.beginTransmission(i2cAddress);
     if (Wire.endTransmission() != 0) return false;
 
     pwm.begin();
     pwm.setPWMFreq(frequency);
-    pwmFrequency = frequency;  // 角度換算要用同一個頻率
+    pwmFrequency = frequency;
 
     delay(10);
     initialized = true;
@@ -31,15 +31,12 @@ bool ServoMotor::setAngle(uint8_t channel, float angle) {
 
     if (isnan(angle) || isinf(angle)) return false;
 
-    // 限制角度在 0~180 度
     angle = constrain(angle, 0.0f, 180.0f);
 
-    // 角度轉換成脈波寬度（保留小數，避免截斷）
     float pulseUs = pulseMin[channel] +
                     angle / 180.0f * (pulseMax[channel] - pulseMin[channel]);
 
-    // 依據 PWM 頻率換算成 PCA9685 的 12-bit 計數值（四捨五入）
-    // 50 Hz 時 1 tick ≈ 4.88 us，1 度 ≈ 11.1 us ≈ 2.3 tick
+    // 換算成 PCA9685 的 12-bit 計數值（50 Hz 時 1 tick ≈ 4.88 us）。
     float periodUs = 1000000.0f / pwmFrequency;
 
     long ticks = lroundf(pulseUs * 4096.0f / periodUs);

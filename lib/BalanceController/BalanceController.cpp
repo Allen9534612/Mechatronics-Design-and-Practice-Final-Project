@@ -25,7 +25,7 @@ void BalanceController::update(bool ballPresent, float x, float y,
     float errX = x - targetX;
     float errY = y - targetY;
 
-    // 微分取「量測值」的變化，避免改目標點時輸出暴衝
+    // 微分取量測值的變化，避免改目標點時輸出暴衝。
     if (hasLast) {
         float rawDX = (x - lastX) / dt;
         float rawDY = (y - lastY) / dt;
@@ -38,7 +38,7 @@ void BalanceController::update(bool ballPresent, float x, float y,
     lastY = y;
     hasLast = true;
 
-    // 積分（輸出飽和時停止累積，避免 windup）
+    // 輸出飽和時停止累積積分，避免 windup。
     bool saturated = sqrt(outX * outX + outY * outY) >= maxTilt;
     if (!saturated && ki > 0) {
         integX += errX * dt;
@@ -48,7 +48,7 @@ void BalanceController::update(bool ballPresent, float x, float y,
         integY = constrain(integY, -lim, lim);
     }
 
-    // u = 球偏離方向的修正量；平台要往反方向傾，所以取負號
+    // 平台要往球偏離的反方向傾，所以取負號。
     float uX = kp * errX + ki * integX + kd * dX;
     float uY = kp * errY + ki * integY + kd * dY;
 

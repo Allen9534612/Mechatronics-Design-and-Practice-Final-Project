@@ -18,7 +18,7 @@ bool PlatformKinematics::solveVector(double a, double b, double c, double h,
                                      float modelDeg[3]) const {
     const double s3 = sqrt(3.0);
 
-    // ---- 上盤三個球關節 A1、A2、A3 ----
+    // 上盤球關節 A1~A3。
     double d1 = sqrt(4 * c * c + sq(a - s3 * b));
     double d2 = sqrt(c * c + a * a);
     double d3 = sqrt(4 * c * c + sq(a + s3 * b));
@@ -33,7 +33,7 @@ bool PlatformKinematics::solveVector(double a, double b, double c, double h,
     if (fabs(A1[2]) < 1e-9 || fabs(A2[2]) < 1e-9 || fabs(A3[2]) < 1e-9)
         return false;
 
-    // ---- 中間關節 C1、C2、C3（擺臂末端）----
+    // 擺臂末端關節 C1~C3。
     double p1 = (-A1[0] + s3 * A1[1] - 2 * lb) / A1[2];
     double q1 =
         (sq(A1[0]) + sq(A1[1]) + sq(A1[2]) + l2 * l2 - l1 * l1 - lb * lb) /
@@ -61,7 +61,7 @@ bool PlatformKinematics::solveVector(double a, double b, double c, double h,
     double disc2 = sv2 * sv2 - 4 * r2 * t2;
     double disc3 = sv3 * sv3 - 4 * r3 * t3;
     if (disc1 < 0 || disc2 < 0 || disc3 < 0)
-        return false;  // 該姿態超出機構可達範圍
+        return false;  // 超出機構可達範圍。
 
     double c11 = (-sv1 - sqrt(disc1)) / (2 * r1);
     double c12 = -s3 * c11;
@@ -78,7 +78,7 @@ bool PlatformKinematics::solveVector(double a, double b, double c, double h,
 
     double c13 = sqrt(z1), c23 = sqrt(z2), c33 = sqrt(z3);
 
-    // ---- 擺臂角度 ----
+    // 擺臂角度。
     double th1 = M_PI / 2 - atan2(sqrt(c11 * c11 + c12 * c12) - lb, c13);
     double th2 = atan2(c23, c21 - lb);
     double th3 = M_PI / 2 - atan2(sqrt(c31 * c31 + c32 * c32) - lb, c33);

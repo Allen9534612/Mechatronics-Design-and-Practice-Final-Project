@@ -53,8 +53,8 @@ void IRSensorArray::begin() {
     if (sensor.vl53l7cx_set_resolution(use8x8 ? VL53L7CX_RESOLUTION_8X8
                                               : VL53L7CX_RESOLUTION_4X4) != 0)
         halt("設定解析度失敗", 0);
-    if (sensor.vl53l7cx_set_ranging_frequency_hz(
-            use8x8 ? TOF_FREQ_8X8_HZ : TOF_FREQ_4X4_HZ) != 0)
+    if (sensor.vl53l7cx_set_ranging_frequency_hz(use8x8 ? TOF_FREQ_8X8_HZ
+                                                        : TOF_FREQ_4X4_HZ) != 0)
         halt("設定頻率失敗", 0);
 
     Serial.printf("模式：預設 %dx%d 解析度，頻率 %dHz\n", current_grid_size,

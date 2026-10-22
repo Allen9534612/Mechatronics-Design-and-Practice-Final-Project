@@ -1,3 +1,7 @@
+// 平衡球平台主程式：感測 -> 球位置估測 -> PID -> 逆向運動學 -> 伺服。
+// 序列埠輸出 DATA（距離矩陣）與 STAT（狀態）供 script/heatmap.py 顯示，
+// 並接受文字指令（輸入 ? 查看）。
+
 #include <Arduino.h>
 
 #include "BalanceController.h"
@@ -7,62 +11,50 @@
 #include "PlatformKinematics.h"
 #include "ServoMotor.h"
 
-// =====================================================================
-// 硬體腳位、機構尺寸、伺服校正、感測器座標轉換、PID 預設值
-// 全部定義在 include/Config.h
-// =====================================================================
-PlatformKinematics kinematics;  // 機構尺寸取自 Config.h
+enum Mode {
+    MODE_BALL,  // PID 自動平衡
+    MODE_TILT,  // 指定傾角
+    MODE_RAW    // 直接指定伺服角度
+};
 
-// 伺服校正（執行中可用 c 指令修改，改完記得抄回 Config.h 的 SERVO_CAL_DEFAULT）
-ServoCal servoCal[3] = {SERVO_CAL_DEFAULT[0], SERVO_CAL_DEFAULT[1],
-                        SERVO_CAL_DEFAULT[2]};
+// 球位置，座標單位為 mm。
+struct BallReading {
+    bool present;
+    float x;
+    float y;
+};
 
-// =====================================================================
-// 全域物件
-// =====================================================================
+PlatformKinematics kinematics;
 ServoMotor motors;
 BalanceController pid;
 IRSensorArray irSensor;
 BallPositionEstimator estimator;
 
-enum Mode {
-    MODE_BALL,  // 依球位置自動控制（PID）
-    MODE_TILT,  // 直接指定傾角
-    MODE_RAW    // 直接指定三顆伺服角度
-};
+// 執行中可用 c 指令修改，改完需手動抄回 Config.h 的 SERVO_CAL_DEFAULT。
+ServoCal servoCal[3] = {SERVO_CAL_DEFAULT[0], SERVO_CAL_DEFAULT[1],
+                        SERVO_CAL_DEFAULT[2]};
 
 Mode mode = MODE_TILT;
-
 float height = PLATFORM_DEFAULT_HEIGHT_MM;
 float maxTilt = 0.0f;
-float levelModel[3];  // 水平時三顆伺服的模型角（校正基準）
+float levelModel[3];  // 水平姿態下三顆伺服的模型角，作為校正基準。
 float lastServo[3] = {0, 0, 0};
-
-float targetX = BALANCE_TARGET_X, targetY = BALANCE_TARGET_Y;  // 希望球停的位置（mm，盤面中心為原點）
-float tiltTheta = 0.0f, tiltPhi = 0.0f;
-
-// 模擬的球位置（之後由紅外線陣列取代）
-struct BallReading {
-    bool present;
-    float x;  // mm，感測器座標
-    float y;
-};
+float targetX = BALANCE_TARGET_X;  // 目標球位置，盤面中心為原點。
+float targetY = BALANCE_TARGET_Y;
+float tiltTheta = 0.0f;
+float tiltPhi = 0.0f;
 
 BallReading manualBall = {false, 0.0f, 0.0f};
 BallReading irBall = {false, 0.0f, 0.0f};
-float lastDistMm = 0.0f;    // 最近一次估測的球附近平均距離（遙測用）
-int lastValidZones = 0;     // 最近一次畫面的有效區域數（遙測用）
+float lastDistMm = 0.0f;  // 供 STAT 回報。
+int lastValidZones = 0;
 
-// =====================================================================
-// 球位置來源
-// 紅外線陣列做好後，只要改這個函式：回傳球是否在盤上與球的 x, y（mm）
-// =====================================================================
 bool readBallPosition(BallReading& ball) {
     ball = USE_IR_SENSOR ? irBall : manualBall;
     return ball.present;
 }
 
-// 感測器座標轉成平台座標
+// 依 Config.h 的旋轉/翻轉設定，把感測器座標轉成平台座標。
 void sensorToPlatform(float sx, float sy, float& px, float& py) {
     if (SENSOR_FLIP_X) sx = -sx;
     if (SENSOR_FLIP_Y) sy = -sy;
@@ -72,9 +64,6 @@ void sensorToPlatform(float sx, float sy, float& px, float& py) {
     py = sx * sin(r) + sy * cos(r);
 }
 
-// =====================================================================
-// 輸出到伺服
-// =====================================================================
 float modelToServo(int leg, float modelDeg) {
     const ServoCal& c = servoCal[leg];
     float a = c.neutral + c.gain * (modelDeg - levelModel[leg]) + c.offset;
@@ -88,11 +77,11 @@ void writeServos(const float servoDeg[3]) {
     }
 }
 
-// 指定平台姿態：往 phi 方向那一側往下傾 theta 度
+// 平台往 phiDeg 方向那一側下傾 thetaDeg 度。無解時維持原姿態並回傳 false。
 bool applyTilt(float thetaDeg, float phiDeg) {
     float model[3];
     if (!kinematics.solveSpherical(thetaDeg, phiDeg, height, model))
-        return false;  // 解不出來就維持上一個姿態
+        return false;
 
     float servo[3];
     for (int i = 0; i < 3; i++) servo[i] = modelToServo(i, model[i]);
@@ -101,9 +90,6 @@ bool applyTilt(float thetaDeg, float phiDeg) {
     return true;
 }
 
-// =====================================================================
-// 序列埠指令
-// =====================================================================
 void printHelp() {
     Serial.println();
     Serial.println("========== 指令（單位：mm、度）==========");
@@ -113,16 +99,18 @@ void printHelp() {
     Serial.println("  b x y        同上");
     Serial.println("  n            球離開盤面，回水平");
     Serial.println("  r            （紅外線模式）恢復自動控制");
-    Serial.println("  g x y        設定目標點（mm，盤面中心為原點，預設 0 0）");
+    Serial.println("  g x y        設定目標點（mm，盤面中心為原點）");
     Serial.println("  t 傾角 方向   直接傾斜：往「方向」那側往下傾，例：t 5 0");
     Serial.println("  l            回水平");
     Serial.println(
-        "  a a1 a2 a3   設定三顆伺服角度（會自動加上各自 offset，a 90 90 90 = "
+        "  a a1 a2 a3   設定三顆伺服角度（會加上各自 offset，a 90 90 90 = "
         "水平）");
     Serial.println(
         "  c 腳 neutral [gain] [offset]   設定伺服校正，例：c 2 92 1 0");
-    Serial.println("  p kp ki kd   設定 PID（mm→度；kp:度/mm ki:度/(mm·s) kd:度/(mm/s)）");
+    Serial.println(
+        "  p kp ki kd   設定 PID（kp:度/mm ki:度/(mm·s) kd:度/(mm/s)）");
     Serial.println("  h 高度        設定平台高度");
+    Serial.println("  4 / 8        切換感測器解析度");
     Serial.println("  s            顯示目前狀態");
     Serial.println("  ?            顯示這份說明");
     Serial.println("==========================================");
@@ -134,8 +122,7 @@ void printStatus() {
                                 : mode == MODE_TILT ? "指定傾角"
                                                     : "直接角度");
     Serial.printf("高度: %.1f mm  最大傾角: %.1f 度\n", height, maxTilt);
-    Serial.printf("PID(mm→度): kp=%.4f ki=%.4f kd=%.4f\n", pid.kp, pid.ki,
-                  pid.kd);
+    Serial.printf("PID: kp=%.4f ki=%.4f kd=%.4f\n", pid.kp, pid.ki, pid.kd);
     Serial.printf("模擬球: %s (%.1f, %.1f)  目標: (%.1f, %.1f)\n",
                   manualBall.present ? "在盤上" : "不在", manualBall.x,
                   manualBall.y, targetX, targetY);
@@ -150,11 +137,10 @@ void printStatus() {
     }
 }
 
-// 把一行指令切成字詞（空白或逗號分隔）
-// 機器可讀的遙測行，給 script/heatmap.py 顯示整條資料流：
+// 輸出一行狀態，欄位順序需與 script/heatmap.py 的 STAT_FIELDS 一致：
 // STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,
 //      maxTilt,distMm,validZones,integX,integY
-// mode：0 = PID 自動、1 = 指定傾角、2 = 直接角度；x,y 為平台座標（mm）
+// mode 為 Mode 的數值，x、y 為平台座標（mm）。
 void printStat(bool present, float px, float py) {
     Serial.printf(
         "STAT,%d,%d,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.4f,%.4f,%.4f,%.1f,"
@@ -165,6 +151,7 @@ void printStat(bool present, float px, float py) {
         pid.integralY());
 }
 
+// 以空白或逗號切字，回傳字詞數。
 int splitTokens(char* line, char* tokens[], int maxTokens) {
     int n = 0;
     char* p = strtok(line, " ,\t");
@@ -181,7 +168,7 @@ bool parseNumber(const char* s, float& out) {
     return end != s && *end == '\0' && !isnan(out) && !isinf(out);
 }
 
-// 從 tokens[from] 開始讀 count 個數字
+// 從 tokens[from] 起讀 count 個數字。
 bool parseNumbers(char* tokens[], int ntok, int from, int count, float out[]) {
     if (ntok - from < count) return false;
     for (int i = 0; i < count; i++)
@@ -189,7 +176,7 @@ bool parseNumbers(char* tokens[], int ntok, int from, int count, float out[]) {
     return true;
 }
 
-// 手動輸入球位置：依目前誤差算一次傾角（只用 kp，沒有積分、微分），轉到位後停止
+// 手動模式：依目前誤差只用 kp 算一次傾角並轉到位，之後不再控制。
 void setBall(float x, float y) {
     manualBall = {true, x, y};
 
@@ -205,7 +192,7 @@ void setBall(float x, float y) {
     float errX = px - targetX;
     float errY = py - targetY;
 
-    // 平台往球的反方向傾（球那一側抬高），大小 = kp × 誤差距離
+    // 球那一側要抬高，所以往球的反方向傾。
     float tx = -pid.kp * errX;
     float ty = -pid.kp * errY;
     float mag = sqrt(tx * tx + ty * ty);
@@ -226,9 +213,12 @@ void setBall(float x, float y) {
         ">> 球 (%.1f, %.1f) 誤差 (%.1f, %.1f) → 傾角 %.2f 度%s，往 %.1f "
         "度方向往下\n",
         px, py, errX, errY, theta, (mag > maxTilt) ? "（已達上限）" : "", phi);
-    Serial.printf("   伺服 1 (CH%d): %.1f 度\n", SERVO_CHANNEL[0], lastServo[0]);
-    Serial.printf("   伺服 2 (CH%d): %.1f 度\n", SERVO_CHANNEL[1], lastServo[1]);
-    Serial.printf("   伺服 3 (CH%d): %.1f 度\n", SERVO_CHANNEL[2], lastServo[2]);
+    Serial.printf("   伺服 1 (CH%d): %.1f 度\n", SERVO_CHANNEL[0],
+                  lastServo[0]);
+    Serial.printf("   伺服 2 (CH%d): %.1f 度\n", SERVO_CHANNEL[1],
+                  lastServo[1]);
+    Serial.printf("   伺服 3 (CH%d): %.1f 度\n", SERVO_CHANNEL[2],
+                  lastServo[2]);
 }
 
 void handleCommand(char* line) {
@@ -238,7 +228,7 @@ void handleCommand(char* line) {
 
     float v[4];
 
-    // 只輸入兩個數字 → 球的位置
+    // 只有兩個數字視為球位置。
     if (n == 2 && parseNumbers(tok, n, 0, 2, v)) {
         setBall(v[0], v[1]);
         return;
@@ -334,13 +324,12 @@ void handleCommand(char* line) {
                 mode = MODE_RAW;
                 manualBall.present = false;
 
-                // 輸入角度 + 各馬達 offset = 實際送出的角度
-                // 例：offset 校正好後，a 90 90 90 就是水平
+                // 實際角度 = 輸入角度 + 各自 offset。
                 float out[3];
                 for (int i = 0; i < 3; i++)
                     out[i] = constrain(v[i] + servoCal[i].offset, 0.0f, 180.0f);
 
-                writeServos(out);  // 不經過 minDeg/maxDeg 上下限，校正時請小心
+                writeServos(out);  // 不受 minDeg/maxDeg 限制，校正時請小心。
                 Serial.printf(
                     ">> 輸入 %.1f / %.1f / %.1f → 加 offset 後實際 %.1f / %.1f "
                     "/ %.1f（PCA9685 計數 %u / %u / %u）\n",
@@ -367,8 +356,8 @@ void handleCommand(char* line) {
                 c.gain = (g < 0) ? -1.0f : 1.0f;
             if (n >= 5 && parseNumber(tok[4], o)) c.offset = o;
             Serial.printf(
-                ">> 腳 %d：neutral=%.1f gain=%.0f offset=%.1f（記得抄回程式的 "
-                "servoCal）\n",
+                ">> 腳 %d：neutral=%.1f gain=%.0f offset=%.1f（記得抄回 "
+                "Config.h）\n",
                 (int)leg, c.neutral, c.gain, c.offset);
             if (mode == MODE_TILT) applyTilt(tiltTheta, tiltPhi);
             break;
@@ -395,7 +384,8 @@ void handleCommand(char* line) {
                                   kinematics.maxHeight());
                     break;
                 }
-                float newMax = min(kinematics.computeMaxTilt(v[0]), MAX_TILT_DEG);
+                float newMax =
+                    min(kinematics.computeMaxTilt(v[0]), MAX_TILT_DEG);
                 if (newMax <= 0) {
                     Serial.println(">> 錯誤：這個高度無法保持水平");
                     break;
@@ -424,7 +414,8 @@ void handleCommand(char* line) {
     }
 }
 
-// 非阻塞讀取一整行
+// 非阻塞讀取序列埠，收到完整一行才處理。單獨一個 '4' 或 '8'（無換行）
+// 直接切換解析度。
 void pollSerial() {
     static char buf[64];
     static size_t len = 0;
@@ -446,14 +437,10 @@ void pollSerial() {
     }
 }
 
-// =====================================================================
-// setup / loop
-// =====================================================================
 void setup() {
     Serial.begin(SERIAL_BAUD);
-    delay(1000);  // 等待序列埠連線穩定
+    delay(1000);  // 等序列埠連線穩定。
 
-    // 初始化 ESP32 與 PCA9685
     if (!motors.begin(I2C_SDA_PIN, I2C_SCL_PIN, SERVO_PWM_FREQ_HZ)) {
         Serial.println("PCA9685 initialization failed!");
         while (1) delay(1000);
@@ -463,7 +450,6 @@ void setup() {
         irSensor.begin();
     }
 
-    // 以預設高度水平姿態作為校正基準
     if (!kinematics.solveSpherical(0, 0, height, levelModel)) {
         Serial.println("逆向運動學在預設高度無解，請檢查機構尺寸");
         while (1) delay(1000);
@@ -474,7 +460,6 @@ void setup() {
     Serial.printf("水平時模型角: %.2f / %.2f / %.2f，最大傾角 %.1f 度\n",
                   levelModel[0], levelModel[1], levelModel[2], maxTilt);
 
-    // 開機先回水平
     applyTilt(0, 0);
 
     if (USE_IR_SENSOR) {
@@ -494,11 +479,10 @@ void loop() {
         int valid_zone_count = 0;
 
         if (irSensor.readData(grid_strength, grid_dist, valid_zone_count)) {
-            BallEstimate est = estimator.estimate(
-                grid_strength, grid_dist, irSensor.current_grid_size,
-                valid_zone_count);
+            BallEstimate est = estimator.estimate(grid_strength, grid_dist,
+                                                  irSensor.current_grid_size,
+                                                  valid_zone_count);
 
-            // 球位置（mm，感測器視野中心為原點）交給後面的 PID
             irBall.present = est.valid;
             lastDistMm = est.distMm;
             lastValidZones = valid_zone_count;
@@ -507,7 +491,7 @@ void loop() {
                 irBall.y = est.yMm;
             }
 
-            // DATA 行維持格點座標（script/heatmap.py 使用），無球為 -1
+            // DATA 的球位置用格點座標（heatmap.py 繪圖用），無球為 -1。
             float center_x = est.valid ? est.gridX : -1.0f;
             float center_y = est.valid ? est.gridY : -1.0f;
 
@@ -542,17 +526,13 @@ void loop() {
     float px = 0, py = 0;
     if (present) sensorToPlatform(ball.x, ball.y, px, py);
 
-    // 不論模式都送遙測，讓 GUI 隨時看得到目前狀態
     if (now - lastStat >= STAT_PERIOD_MS) {
         lastStat = now;
         printStat(present, px, py);
     }
 
-    // 手動模式不跑連續 PID（每次輸入在 setBall() 裡算一次就停）
-    if (!USE_IR_SENSOR) return;
-
-    // 下了 t / l / a 指令後暫停自動控制，輸入 r 恢復
-    if (mode != MODE_BALL) return;
+    // 手動模式與 t / l / a 之後都不跑 PID，輸入 r 恢復。
+    if (!USE_IR_SENSOR || mode != MODE_BALL) return;
 
     pid.update(present, px, py, targetX, targetY, dt, maxTilt, tiltTheta,
                tiltPhi);
