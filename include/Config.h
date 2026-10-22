@@ -10,7 +10,6 @@
 // ====== 主控制迴圈 ======
 static constexpr long SERIAL_BAUD = 115200;
 static constexpr uint32_t CONTROL_PERIOD_MS = 20;  // 控制週期（50 Hz）
-static constexpr uint32_t PRINT_PERIOD_MS = 250;   // 狀態列印間隔
 static constexpr uint32_t STAT_PERIOD_MS = 100;    // STAT 遙測行間隔（script/heatmap.py 使用）
 
 // false：手動輸入球位置，每輸入一次只算一次、轉到位就停

@@ -529,7 +529,6 @@ void loop() {
 
     static uint32_t lastControl = 0;
     static uint32_t lastStat = 0;
-    static uint32_t lastPrint = 0;
     uint32_t now = millis();
 
     if (now - lastControl < CONTROL_PERIOD_MS) return;
@@ -558,17 +557,4 @@ void loop() {
     pid.update(present, px, py, targetX, targetY, dt, maxTilt, tiltTheta,
                tiltPhi);
     applyTilt(tiltTheta, tiltPhi);
-
-    if (now - lastPrint >= PRINT_PERIOD_MS) {
-        lastPrint = now;
-        if (present)
-            Serial.printf(
-                "球 (%6.1f, %6.1f) 誤差 (%6.1f, %6.1f) → 傾角 %5.2f 方向 %5.1f "
-                "→ 伺服 %6.1f %6.1f %6.1f\n",
-                px, py, px - targetX, py - targetY, tiltTheta, tiltPhi,
-                lastServo[0], lastServo[1], lastServo[2]);
-        else
-            Serial.printf("無球 → 傾角 %5.2f → 伺服 %6.1f %6.1f %6.1f\n",
-                          tiltTheta, lastServo[0], lastServo[1], lastServo[2]);
-    }
 }
