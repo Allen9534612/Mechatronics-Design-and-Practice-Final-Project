@@ -50,9 +50,11 @@
 - 可在 VS Code 使用命令列排版。另外，儲存檔案時也會自動排版。
    ```bash
    ruff check --fix script/
+   ```
 
    ```bash
    Get-ChildItem -Path "src", "lib", "include" -Include *.cpp, *.c, *.h -Recurse | ForEach-Object { clang-format -i -style=file $_.FullName }
+   ```
 
 - 在檔案按下 `Shift + Alt + F` 亦可排版。
 - 鼠標懸浮在 Warnings 時，按下 `Ctrl + .` 可檢視 Linter 提供的快速修正選項。
