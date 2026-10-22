@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 回覆使用者一律使用中文。
 - 每次開發前，請先閱讀本檔案（CLAUDE.md）以掌握專案現況。
 - 任何開發歷程（完成的工作、重大決策、已知問題等）都要記錄在本檔案的「開發歷程」章節中，保持更新。
+- 排版：C/C++ 用 `clang-format -i -style=file`（src/lib/include），Python 用 `ruff format script/` 與 `ruff check --fix script/`（指令見 README）；改完程式後先排版再 commit。
 
 ## Project overview
 
@@ -48,8 +49,8 @@ There is no test suite or linter configured in this repo.
   6. `lib/ServoMotor`：透過 PCA9685 輸出 PWM，`setAngle(channel, angle)`。
   `main.cpp` 的 `modelToServo()` 依 `servoCal`（neutral/gain/offset/限幅）把模型角轉成伺服角。`maxTilt = min(運動學可達最大傾角, MAX_TILT_DEG)`。
 - 序列埠：`DATA,<N>,<N*N 個距離>,<gridX>,<gridY>` 供 `script/heatmap.py` 使用，**gridX/gridY 維持格點座標、無球為 -1**；指令列表輸入 `?` 查看。
-- 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
-- `script/heatmap.py`：moderngl（OpenGL 3.3）+ pygame 視窗的監控 GUI，可任意縮放（版面依視窗大小等比例縮放）。左側為資料流數值（感測器 → 估測 → PID → 伺服），中間為距離熱圖/球位置/傾斜方向/韌體訊息，右側為可調項按鈕（解析度、自動/回水平、PID 增益、目標點、高度、傾斜測試、指令輸入框）與滑鼠懸停提示。背景執行緒用 pyserial 收發（斷線自動重連），按鈕送出的就是韌體的序列埠指令（`4`/`8`/`r`/`l`/`p`/`g`/`h`/`t`…）；顯示值一律以韌體回報的 STAT 為準。GUI 內的 `SERVO_MIN_DEG/MAX_DEG`、`MIN_DISTANCE` 需與 Config.h 一致。
+- 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。韌體不再週期性輸出人類可讀狀態列，指令回覆（`>>` 開頭）與 `s` 指令仍保留。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
+- `script/heatmap.py`：moderngl（OpenGL 3.3）+ pygame 的監控 GUI，視窗可任意縮放（版面等比例縮放），配色為中性灰階加單一強調色。左側為資料流數值（感測器 → 位置估測 → PID → 伺服），中間為距離熱圖（色階依畫面內距離範圍自動調整）、球位置、傾斜方向與韌體訊息，右側為可調項（解析度、自動/回水平、PID、目標點、高度、傾斜測試、指令輸入框）與懸停提示。pyserial 背景執行緒收發並自動重連，顯示值一律以 STAT 為準。程式以 DPI-aware 啟動（避免 Windows 縮放造成模糊），啟動時偵測顯卡並在左下角顯示實際渲染的 GPU；用到內顯而系統有獨顯時會警示，`--gpu high` 可寫入 Windows 圖形偏好（`HKCU\Software\Microsoft\DirectX\UserGpuPreferences`）並重新啟動。GUI 內的 `SERVO_MIN_DEG/MAX_DEG` 需與 Config.h 一致。
 - `test/raw.cpp`：獨立的感測器原始資料測試程式（不屬於主 build）。
 
 ## 開發歷程
@@ -81,3 +82,4 @@ There is no test suite or linter configured in this repo.
   - 仍待處理：`TOF_FOV_DEG`、感測器安裝方向與 `SENSOR_FLIP/ROTATION`、實際訊號形狀（目前以高斯球模擬）、PID 增益都需上機校正；`IRSensorArray::halt()` 找不到感測器時仍會無限迴圈。
 - 2026-10-22：更正 `TOF_FOV_DEG` 為 60（VL53L7CX 單邊 60°x60°、對角約 90°；先前誤用 45°，會讓 mm 換算偏小約 25%）。
 - 2026-10-22：整理 git（3 個 commit：設定集中化、估測器 mm 化、文件）。新增 `STAT` 遙測行（`main.cpp` 的 `printStat()`、`Config.h` 的 `STAT_PERIOD_MS`），並重寫 `script/heatmap.py` 為 moderngl/OpenGL 的可縮放 GUI（左：資料流數值；右：可調項按鈕與提示；pyserial 背景執行緒收發；`--demo` 模擬模式；`--snapshot` 截圖）。新增 `script/requirements.txt`。驗證：用 pygame 事件模擬 19 項點擊/鍵盤/滾輪/縮放操作，確認各按鈕送出正確指令；把 host 端編譯的真實韌體輸出（DATA/STAT）餵給 GUI 解析器，格式吻合；韌體 mock 測試 1137 項與 `pio run -e esp32` 皆通過。已知注意：4x4 / 60 Hz 時 DATA 約 8 KB/s，加上 STAT 與狀態列已接近 115200 baud 上限（約 11.5 KB/s），若序列埠出現延遲/掉資料，考慮降低 4x4 頻率、提高 baud（需同步改 `SERIAL_BAUD`、`monitor_speed`、heatmap `--baud`）或移除人類可讀狀態列。GUI 尚未在真實硬體上驗證。
+- 2026-10-22：移除週期性狀態列（改由 STAT/GUI 顯示）；src/include/lib 註解精簡為 Google 風格；`heatmap.py` 改版：單一強調色的扁平卡片版面、熱圖色階自動調整、Google 風格 docstring（4 格縮排，以 ruff 排版）。模糊的原因是 Windows 縮放 175% 下程式非 DPI-aware 被系統放大（本機只有一張 RTX 4060，並非用錯顯卡），已改為 DPI-aware 並依縮放比例決定初始視窗大小；另加入顯卡偵測、GL 渲染器顯示與 `--gpu` 選項。驗證：21 項 GUI 互動測試、顯卡函式測試、韌體 mock 測試 1136 項與 `pio run -e esp32` 通過；`--gpu high` 的寫入與重新啟動流程只測了登錄檔讀寫函式，未實際執行。
