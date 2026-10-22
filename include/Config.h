@@ -25,6 +25,10 @@ static constexpr uint8_t TOF_FREQ_4X4_HZ = 60;
 static constexpr uint8_t TOF_FREQ_8X8_HZ = 15;
 static constexpr float TOF_FOV_DEG = 60.0f;
 
+// 銳化會把互相重疊的近距離目標標成狀態碼 12 而被篩選丟棄（透過壓克力板量測
+// 時，板子與球靠得很近，預設值會讓大部分區域失效），需設為 0。
+static constexpr uint8_t TOF_SHARPENER_PERCENT = 0;
+
 // 區域有效性篩選：距離 (mm) 與 signal_per_spad。
 static constexpr int TOF_FILTER_MIN_DISTANCE = 50;
 static constexpr int TOF_FILTER_MAX_DISTANCE = 500;
