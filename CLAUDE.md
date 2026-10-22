@@ -36,18 +36,18 @@ There is no test suite or linter configured in this repo.
 
 ## Architecture
 
-- `platformio.ini` defines three environments:
-  - `esp32` (default): `espressif32` platform, `esp32dev` board, depends on `madhephaestus/ESP32Servo`.
-  - `mega` / `uno`: `atmelavr` platform, depend on `arduino-libraries/Servo`, `SoftwareSerial`, and `FreeRTOS`.
-- `include/Config.h` 是全專案共用的設定檔（接腳、感測器數量、平台幾何、PID 參數等），所有模組都會 include 它。裡面標 `TODO` 的數值都是佔位值，需依實際硬體調整。
-- `src/main.cpp` 的 `loop()` 依固定週期（`LOOP_INTERVAL_MS`）執行完整 pipeline，對應「專案介紹」的 5 個階段，依序呼叫下面四個 `lib/` 模組 + `ServoMotor`：
-  1. `lib/IRSensorArray` — 讀取紅外線感測陣列原始值（`update()` / `reading(i)`）。目前 `update()` 是用 `analogRead` 的佔位實作，需依實際感測器型別調整。
-  2. `lib/BallPositionEstimator` — 把感測陣列讀值換算成球的位置 `BallPosition2D{x, y, valid}`。目前 `compute()` 用「假設感測器環狀均勻分布、讀值當權重做加權平均」的佔位演算法，需依實際感測器佈局重新設計。
-  3. `lib/BalanceController` — 吃球的位置，用簡單 PID 算出平台該傾斜的角度 `PlatformTilt{rollDeg, pitchDeg}`。增益值在 `Config.h` 的 `PID_KP/KI/KD`，目前都是佔位值待調校。
-  4. `lib/PlatformKinematics` — 把 `PlatformTilt` 換算成三顆馬達各自的角度 `ServoAngles3{theta1, theta2, theta3}`。目前 `computeServoAngles()` 只是假設三馬達 120° 環狀佈局的簡化近似公式（非真正逆向運動學），需依實際平台機構（搖臂長度、佈局半徑等）重新推導。
-  5. `lib/ServoMotor` — 控制單顆伺服馬達。`ServoMotor` 用 ESP32 LEDC 直接產生 PWM，支援立即寫入角度（`writeAngle`/`writeMicroseconds`）與平滑轉動（`setTargetAngle` + 每週期呼叫 `run(stepDeg)` 逼近目標角度）。**注意：** 目前直接呼叫 ESP32-only 的 LEDC API（`ledcSetup`、`ledcAttachPin`、`ledcWrite`、`ledcDetachPin`），沒有走 `lib_deps` 宣告的 `ESP32Servo`/`Servo` 抽象層，所以這個 library 現在只能在 `esp32` 環境編譯，無法用於 `mega`/`uno` 環境。
-- 四個資料流模組之間用上一階段定義的 struct 傳遞資料（`BallPosition2D` 定義在 `BallPositionEstimator.h`、`PlatformTilt` 定義在 `BalanceController.h`、`ServoAngles3` 定義在 `PlatformKinematics.h`），下游模組 include 上游的 header 取得型別。
-- 目前所有感測/定位/控制演算法都是功能骨架（佔位邏輯，標了 TODO），可以編譯執行跑完整個 pipeline，但數值不會是正確的平衡控制結果，需等硬體規格確定後逐一替換。
+- `platformio.ini`：`esp32`（預設，`nodemcu-32s`）依賴 ESP32Servo、Adafruit PWM Servo Driver、stm32duino/VL53L7CX；`mega`/`uno` 僅保留設定，現有程式碼只能在 esp32 編譯。`[env] build_flags = -Iinclude` 讓 `lib/*` 也能 `#include "Config.h"`。
+- `include/Config.h`：**全專案唯一的設定來源**（I2C 腳位 SDA=22/SCL=21、VL53L7CX 參數與篩選門檻、感測器座標旋轉/翻轉、PCA9685 與伺服脈寬、伺服校正 `SERVO_CAL_DEFAULT`、平台機構尺寸、`MAX_TILT_DEG`、PID 預設增益等）。`src/main.cpp` 與所有 `lib/*` 都 include 它，不要在其他檔案重複定義常數。
+- 資料流（`src/main.cpp` 的 `loop()`，`CONTROL_PERIOD_MS` 週期）：
+  1. `lib/IRSensorArray`：透過 I2C 驅動 VL53L7CX，`readData()` 取得 4x4/8x8 的 `grid_strength`、`grid_dist`（無效區域為 0）與有效區域數；`changeResolution(4|8)` 切換解析度。
+  2. `lib/BallPositionEstimator`：`estimate()` 回傳 `BallEstimate{valid, gridX, gridY, distMm, xMm, yMm}`。先找峰值，再用三點 log 拋物線求次格點位置（邊緣峰值同側外推，不在邊界外補值），距離取球附近以訊號強度加權的平均；`gridToMm()` 依 `TOF_FOV_DEG`（60°）與距離把格點換算成 mm，原點在感測器視野中心（+x 向右、+y 向下）。
+  3. `main.cpp` 的 `sensorToPlatform()`：套用 `SENSOR_ROTATION_DEG` / `SENSOR_FLIP_X/Y`，轉成平台座標（mm）。
+  4. `lib/BalanceController`：PID，**輸入 mm（與目標點的誤差）、輸出傾角度數**；kp=度/mm、ki=度/(mm·s)、kd=度/(mm/s)；輸出 `theta`（傾角）與 `phi`（往下傾的方向）。
+  5. `lib/PlatformKinematics`：移植自 I-M-Robotics-Lab/Ball-Balancing-Robot 的三軸逆向運動學，`solveSpherical(theta, phi, h, modelDeg[3])` 與 `computeMaxTilt(h)`。
+  6. `lib/ServoMotor`：透過 PCA9685 輸出 PWM，`setAngle(channel, angle)`。
+  `main.cpp` 的 `modelToServo()` 依 `servoCal`（neutral/gain/offset/限幅）把模型角轉成伺服角。`maxTilt = min(運動學可達最大傾角, MAX_TILT_DEG)`。
+- 序列埠：`DATA,<N>,<N*N 個距離>,<gridX>,<gridY>` 供 `script/heatmap.py` 使用，**gridX/gridY 維持格點座標、無球為 -1**；指令列表輸入 `?` 查看。
+- `test/raw.cpp`：獨立的感測器原始資料測試程式（不屬於主 build）。
 
 ## 開發歷程
 
@@ -64,3 +64,16 @@ There is no test suite or linter configured in this repo.
   - `IRSensorArray` 類別名稱保留（維持 pipeline 其他模組介面相容），但內部已改為包裝 `VL53L7CX` 物件：`begin()` 初始化 I2C 與感測器（解析度設為 8x8、設定更新頻率、開始量測），`update()` 檢查資料是否就緒並讀取 `VL53L7CX_ResultsData`，`count()` 回傳 64，`reading(index)` 回傳該區域距離（mm），新增 `readingValid(index)` 回傳該區域量測是否有效（`target_status` 為 5 或 9）。
   - **尚未處理**：`lib/BallPositionEstimator` 目前仍假設感測器均勻分布在圓周上（用索引算角度、讀值當權重做加權平均），對 8x8 距離矩陣來說已經不合理，下一步需要重新設計成依 8x8 區域網格與 `readingValid()` 來估算球位置。
   - 因為目前環境沒有安裝 PlatformIO CLI，這次改動**未實際編譯驗證**，之後建議在有 `pio`/VS Code PlatformIO 擴充套件的環境跑一次 `pio run -e esp32` 確認。
+- 2026-10-22：用 mock 資料檢查整條 pipeline（`pio run -e esp32` 編譯成功；另在 host 端用 g++ 搭配假的 Arduino/Wire/VL53L7CX/PCA9685 mock，編譯真實的 `src/main.cpp` 與全部 `lib/*`，餵模擬的 4x4/8x8 感測器畫面、序列埠指令與簡易球滾動模擬，共 135 項檢查，134 通過）。測試腳本放在暫存目錄，未納入 repo。結論與已知問題：
+  - 正常：伺服校正與 PCA9685 計數值換算、逆向運動學（最大傾角範圍內全方向可解、極端姿態回傳 false 而非 NaN）、PID 方向（球在 +X → phi=180）與限幅/抗積分飽和、無球時輸出衰減回水平、雜訊/無效畫面不產生 NaN 或超出伺服上下限、4x4↔8x8 切換、全部序列埠指令（含錯誤格式）、閉迴路模擬方向正確且收斂。
+  - **已知問題（座標系）**：`BallPositionEstimator` 輸出的是「格點索引」（4x4 為 0~3、原點在感測器左上角），但 `main.cpp` 直接把它當 mm、以 (0,0) 為目標點餵給 PID。結果球在盤面正中央時也會讓平台傾斜（實測約 0.7 度），且 kp 的單位（度/mm）與輸入單位（格）不符。需在 estimator 或 main 加上「格點→mm」換算（格距）並把原點移到盤面中心。
+  - `Config.h` 目前沒有被任何模組使用（腳位仍是舊的 LEDC/類比設計），與實際的 PCA9685 + VL53L7CX 接線不一致；本檔「Architecture」章節描述的模組介面（`update()/reading()`、`computeServoAngles()`、LEDC `ServoMotor`）也已過時，與現行程式不符。
+  - `IRSensorArray::halt()` 在感測器偵測不到時會無限迴圈（開機卡死，需靠接線檢查）；邊角的球位置估測有往中心偏的偏差（約 0.35 格）。
+- 2026-10-22（修改）：依 mock 檢查結果修正並整合設定：
+  - `BallPositionEstimator` 改版：介面改為 `estimate(strength, dist, N, validCount) → BallEstimate`；改用 3 點 log 拋物線求次格點位置，邊緣峰值改用同側三點外推（原本的邊界複製補值會把邊角的球往外推約 0.35~0.47 格，現在 mock 高斯模型下邊緣誤差 ≤0.035 格、內部 ≤0.01 格；3% 雜訊下平均 0.03 格、最差 ~0.28 格）。新增格點→mm 換算（`TOF_FOV_DEG`/N 為每格視角，乘上球附近加權平均距離），輸出以視野中心為原點的 `xMm/yMm`，PID 輸入與目標點 `g x y` 都改為以盤面中心為原點的 mm。
+  - 先前「球在中心仍傾斜 0.7 度」的原因：不是伺服 offset，而是座標原點在格點 (0,0) 角落而非盤面中心，PID 把中心位置當成誤差；另外當時測試把球放在 (3.5,3.5)，那其實已超出 4x4 格（中心是 1.5），0.7 度是被高估的數字。修正後球在中心時估測為 (0,0) mm，傾角 0.008 度（殘留為前一次位置累積的積分，`r` 指令可重置）。伺服 offset 本身沒有問題（水平時 90 / 85.5 / 86 度）。
+  - PID 單位對齊：輸入 mm、輸出度，增益預設值改由 Config.h 提供（`PID_KP/KI/KD` 改成原本類別內的實際值 0.12/0.01/0.06，`PID_OUTPUT_ALPHA`、`PID_D_ALPHA`、`PID_INTEGRAL_LIMIT_DEG`），`p` 指令與狀態列標明單位。
+  - 所有模組改用 `Config.h`：I2C 腳位（SDA=22、SCL=21，PCA9685 與 VL53L7CX 共用）、VL53L7CX 位址/頻率/篩選門檻/LPn、PCA9685 位址與脈寬、機構尺寸、伺服校正、控制週期等；移除 `IRSensorArray.h` 的 `#define` 與 main.cpp 的重複常數。`MAX_TILT_DEG`（15 度）現在會與運動學可達範圍取小（原本實際為 16.3 度）。`platformio.ini` 新增 `-Iinclude`，否則 `lib/*` 找不到 Config.h。
+  - 驗證：`pio run -e esp32` 成功、無警告；host 端 mock 測試 1137 項全數通過（含估測器真值比對、雜訊、mm 換算、閉迴路球滾動模擬收斂到中心）。
+  - 仍待處理：`TOF_FOV_DEG`、感測器安裝方向與 `SENSOR_FLIP/ROTATION`、實際訊號形狀（目前以高斯球模擬）、PID 增益都需上機校正；`IRSensorArray::halt()` 找不到感測器時仍會無限迴圈。
+- 2026-10-22：更正 `TOF_FOV_DEG` 為 60（VL53L7CX 單邊 60°x60°、對角約 90°；先前誤用 45°，會讓 mm 換算偏小約 25%）。
