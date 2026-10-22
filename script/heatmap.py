@@ -1298,6 +1298,19 @@ class App:
             r.rrect(gx0, gy0, side, side, 10 * s, CARD)
             r.text("等待資料…", gx0 + side / 2, gy0 + side / 2, 14 * s, DIM, "mc")
 
+        if n and not valid.size:
+            mx, my = gx0 + side / 2, gy0 + side / 2
+            r.rrect(
+                gx0 + side * 0.08, my - 34 * s, side * 0.84, 68 * s, 10 * s, BG, 0.88
+            )
+            r.text("沒有有效區域", mx, my - 12 * s, 15 * s, TEXT, "mc", bold=True)
+            why = (
+                "8×8 在近距離可能偵測不到，請改用 4×4"
+                if n == 8
+                else "目標超出距離或訊號強度的篩選範圍"
+            )
+            r.text(why, mx, my + 12 * s, 12 * s, DIM, "mc")
+
         ly = gy0 + side + 12 * s
         steps = 60
         for i in range(steps):
