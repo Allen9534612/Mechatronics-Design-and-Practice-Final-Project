@@ -12,7 +12,10 @@ bool ServoMotor::begin(uint8_t sdaPin, uint8_t sclPin, uint16_t frequency) {
 
     // pwm.begin() 不檢查裝置是否存在，所以先探測。
     Wire.beginTransmission(i2cAddress);
-    if (Wire.endTransmission() != 0) return false;
+    if (Wire.endTransmission() != 0) {
+        initialized = false;
+        return false;
+    }
 
     pwm.begin();
     pwm.setPWMFreq(frequency);

@@ -46,6 +46,7 @@ float tiltPhi = 0.0f;
 
 BallReading manualBall = {false, 0.0f, 0.0f};
 BallReading irBall = {false, 0.0f, 0.0f};
+bool servoReady = false;  // PCA9685 是否偵測到。
 float lastDistMm = 0.0f;  // 供 STAT 回報。
 int lastValidZones = 0;
 
@@ -121,6 +122,7 @@ void printStatus() {
     Serial.printf("模式: %s\n", mode == MODE_BALL   ? "PID 自動"
                                 : mode == MODE_TILT ? "指定傾角"
                                                     : "直接角度");
+    Serial.printf("伺服驅動: %s\n", servoReady ? "已連線" : "未偵測到");
     Serial.printf("高度: %.1f mm  最大傾角: %.1f 度\n", height, maxTilt);
     Serial.printf("PID: kp=%.4f ki=%.4f kd=%.4f\n", pid.kp, pid.ki, pid.kd);
     Serial.printf("模擬球: %s (%.1f, %.1f)  目標: (%.1f, %.1f)\n",
@@ -441,9 +443,10 @@ void setup() {
     Serial.begin(SERIAL_BAUD);
     delay(1000);  // 等序列埠連線穩定。
 
-    if (!motors.begin(I2C_SDA_PIN, I2C_SCL_PIN, SERVO_PWM_FREQ_HZ)) {
-        Serial.println("PCA9685 initialization failed!");
-        while (1) delay(1000);
+    // 沒接 PCA9685 時只停用伺服輸出，感測、估測與 PID 照常執行。
+    servoReady = motors.begin(I2C_SDA_PIN, I2C_SCL_PIN, SERVO_PWM_FREQ_HZ);
+    if (!servoReady) {
+        Serial.println("PCA9685 未偵測到，伺服輸出停用（仍可讀取感測器資料）");
     }
 
     if (USE_IR_SENSOR) {
