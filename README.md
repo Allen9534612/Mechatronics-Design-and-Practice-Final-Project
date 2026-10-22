@@ -16,6 +16,8 @@
 - Python Package:
     - pyserial
     - pygame
+    - clang-format
+    - ruff
     
 - Visual Studio Code
 - VS Code Extension:
@@ -31,7 +33,7 @@
 
 2. 安裝 Python 函式庫：
    ```bash
-   pip install pygame pyserial
+   pip install pygame pyserial clang-format ruff
 
 3. 安裝 VS Code 插件：
     - [PlatformIO](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide)
@@ -45,5 +47,8 @@
 
 本專案程式使用 `Google` 風格撰寫
 
-- 可在 VS Code 使用命令列，或者按下 `Shift + Alt + F` 排版。另外，儲存檔案時也會自動排版。
+- 可在 VS Code 使用命令列排版。另外，儲存檔案時也會自動排版。
+```ruff check --fix script/```
+```Get-ChildItem -Path "src", "lib", "include" -Include *.cpp, *.c, *.h -Recurse | ForEach-Object { clang-format -i -style=file $_.FullName }```
+- 在檔案按下 `Shift + Alt + F` 亦可排版。
 - 鼠標懸浮在 Warnings 時，按下 `Ctrl + .` 可檢視 Linter 提供的快速修正選項。
