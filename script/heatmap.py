@@ -370,6 +370,8 @@ class DemoLink:
         self.bx, self.by, self.vx, self.vy = 40.0, -25.0, 0.0, 0.0
         self.ix = self.iy = 0.0
         self.off_until = 0.0
+        self.raw = None  # 直接角度模式下的三顆伺服角度。
+        self.offsets = [0.0, -4.5, -4.0]
         self.thread = threading.Thread(target=self._run, daemon=True)
         tel.status, tel.connected = "DEMO 模擬資料", True
 
@@ -392,9 +394,11 @@ class DemoLink:
                     self.n = 8
                 elif c == "r":
                     self.mode, self.ix, self.iy = 0, 0.0, 0.0
+                    self.raw = None
                     self.tel.add_log(">> 恢復紅外線陣列自動控制")
                 elif c == "l":
                     self.mode, self.theta, self.phi = 1, 0.0, 0.0
+                    self.raw = None
                     self.tel.add_log(">> 回水平")
                 elif c == "n":
                     self.off_until = time.time() + 2.0
@@ -415,10 +419,33 @@ class DemoLink:
                     th, ph = float(p[1]), float(p[2])
                     if 0 <= th <= self.max_tilt:
                         self.mode, self.theta, self.phi = 1, th, ph
+                        self.raw = None
                         self.tel.add_log(f">> 傾斜 {th:.1f} 度，往 {ph:.1f} 度方向往下")
                     else:
                         self.tel.add_log(
                             f">> 錯誤：傾角需在 0 ~ {self.max_tilt:.1f} 度之間"
+                        )
+                elif c == "d" and len(p) == 4:
+                    v = [float(x) for x in p[1:]]
+                    if all(SERVO_MIN_DEG <= a <= SERVO_MAX_DEG for a in v):
+                        self.mode, self.raw, self.theta = 2, v, 0.0
+                        self.tel.add_log(
+                            f">> 直接角度 {v[0]:.1f} / {v[1]:.1f} / {v[2]:.1f}"
+                        )
+                    else:
+                        self.tel.add_log(
+                            f">> 錯誤：角度需在 {SERVO_MIN_DEG:.0f} ~ {SERVO_MAX_DEG:.0f} 之間"
+                        )
+                elif c == "o":
+                    if len(p) > 1 and p[1].lower() == "r":
+                        self.offsets = [0.0, -4.5, -4.0]
+                        self.tel.add_log(">> 已還原預設原點並清除儲存值")
+                    elif self.mode != 2 or self.raw is None:
+                        self.tel.add_log(">> 請先用 d 指令把平台調到水平，再寫入原點")
+                    else:
+                        self.offsets = [a - 90.0 for a in self.raw]
+                        self.tel.add_log(
+                            f">> 原點已寫入（斷電保留）：水平角度 {self.raw[0]:.1f} / {self.raw[1]:.1f} / {self.raw[2]:.1f}"
                         )
                 else:
                     self.tel.add_log(">> (demo) 不支援這個指令")
@@ -427,6 +454,8 @@ class DemoLink:
         return True
 
     def _servos(self):
+        if self.raw:
+            return list(self.raw)
         return [
             b + 3.0 * self.theta * math.cos(math.radians(self.phi - a))
             for a, b in zip(self.LEG_ANGLES, self.LEVEL)
@@ -968,9 +997,10 @@ HINTS = {
     "ty": "目標點 Y（mm，盤面中心為原點）：球要停的位置。\n指令：g x y",
     "center": "把目標點設回盤面中心 (0, 0)。\n指令：g 0 0",
     "height": "平台中心高度（mm）。會改變最大傾角，超出機構範圍會被韌體拒絕。\n指令：h 高度",
-    "theta": "傾斜測試的傾角（度），按「送出傾斜」才會動作。\n指令：t 傾角 方向",
-    "phi": "傾斜測試的方向（度）：平台往該方向那一側下傾。0 = +X，90 = +Y。\n指令：t 傾角 方向",
-    "tilt": "送出傾斜測試：切換為「指定傾角」模式，自動控制暫停（按 R 恢復）。\n指令：t 傾角 方向",
+    "sv": "伺服實際輸出角度（不含 offset 運算）。調整會切換為「直接角度」模式、暫停自動平衡（按 R 恢復）。滾輪或按住 +/- 可連續調整。\n指令：d a1 a2 a3",
+    "step": "每次調整伺服角度的步進（0.5° / 1° / 2°），按一下切換。",
+    "origin": "把目前三顆伺服的角度寫入為平台水平的原點（存進 ESP32，斷電保留）。請先把平台調到實際水平；需在「直接角度」模式且 PCA9685 有連線。為避免誤按，3 秒內要再按一次確認。\n指令：o",
+    "origin_reset": "還原為 Config.h 的預設原點，並清除 ESP32 已儲存的值。\n指令：o r",
     "cmd": "直接輸入韌體指令，Enter 送出。例：s 顯示狀態、? 說明、c 1 90 1 0 校正伺服。快捷鍵 /",
 }
 DEFAULT_HINT = (
@@ -1002,7 +1032,8 @@ class App:
         self.fullscreen = False
         self.cmd_text, self.cmd_focus = "", False
         self.ov = {}
-        self.test_theta, self.test_phi = 5.0, 0.0
+        self.servo_step = 0.5
+        self.origin_armed_until = 0.0
         self.s = 1.0
 
     # --- 設定值 ---
@@ -1474,34 +1505,69 @@ class App:
                 self.link.send(f"h {nh:.1f}")
         y += h3 + 10 * s
 
-        h4 = 34 * s + 2 * (rh + gap) + 28 * s
-        yy = self.card(bx, y, iw, h4, "傾斜測試")
-        mt = stat["max_tilt"] if ok else 15.0
-        self.test_theta = min(self.test_theta, mt)
-        dl = ui.stepper(
-            "th",
-            (ix, yy, iiw, rh),
-            "傾角 θ (°)",
-            f"{self.test_theta:.1f}",
-            12.5 * s,
-            HINTS["theta"],
-        )
-        self.test_theta = min(max(self.test_theta + dl * 0.5, 0.0), mt)
-        yy += rh + gap
-        dl = ui.stepper(
-            "ph",
-            (ix, yy, iiw, rh),
-            "方向 φ (°)",
-            f"{self.test_phi:.0f}",
-            12.5 * s,
-            HINTS["phi"],
-        )
-        self.test_phi = (self.test_phi + dl * 15.0) % 360.0
-        yy += rh + gap
+        h4 = 34 * s + 3 * (rh + gap) + 30 * s
+        yy = self.card(bx, y, iw, h4, "伺服角度與原點")
         if ui.button(
-            "tilt", (ix, yy, iiw, 24 * s), "送出傾斜", 12.5 * s, HINTS["tilt"]
+            "origin_reset",
+            (bx + iw - 66 * s, y + 7 * s, 54 * s, 22 * s),
+            "還原",
+            11.5 * s,
+            HINTS["origin_reset"],
+            enabled=ok,
         ):
-            self.link.send(f"t {self.test_theta:.1f} {self.test_phi:.0f}")
+            self.link.send("o r")
+        cur = [self.val(f"s{i + 1}", stat) for i in range(3)]
+        for i in range(3):
+            dl = ui.stepper(
+                f"sv{i}",
+                (ix, yy, iiw, rh),
+                f"腳 {i + 1}  CH{SERVO_CHANNELS[i]}",
+                f"{cur[i]:.1f}°" if ok else "—",
+                12.5 * s,
+                HINTS["sv"],
+                enabled=ok,
+            )
+            if dl and ok:
+                new = list(cur)
+                new[i] = round(
+                    min(
+                        max(cur[i] + dl * self.servo_step, SERVO_MIN_DEG), SERVO_MAX_DEG
+                    ),
+                    1,
+                )
+                if new[i] != cur[i]:
+                    for k, v in enumerate(new):
+                        self.set_ov(f"s{k + 1}", v)
+                    self.link.send(f"d {new[0]:.1f} {new[1]:.1f} {new[2]:.1f}")
+                    self.origin_armed_until = 0.0
+                    cur = new
+            yy += rh + gap
+        half = (iiw - 6 * s) / 2
+        if ui.button(
+            "step",
+            (ix, yy, half, 24 * s),
+            f"步進 {self.servo_step:g}°",
+            12.5 * s,
+            HINTS["step"],
+        ):
+            steps = (0.5, 1.0, 2.0)
+            self.servo_step = steps[(steps.index(self.servo_step) + 1) % len(steps)]
+        raw_mode = ok and int(stat["mode"]) == 2
+        armed = time.time() < self.origin_armed_until
+        if ui.button(
+            "origin",
+            (ix + half + 6 * s, yy, half, 24 * s),
+            "再按一次確認" if armed else "寫入原點",
+            12.5 * s,
+            HINTS["origin"],
+            enabled=raw_mode,
+            active=armed,
+        ):
+            if armed:
+                self.origin_armed_until = 0.0
+                self.link.send("o")
+            else:
+                self.origin_armed_until = time.time() + 3.0
         y += h4 + 10 * s
 
         box = (bx, y, iw, 30 * s)
