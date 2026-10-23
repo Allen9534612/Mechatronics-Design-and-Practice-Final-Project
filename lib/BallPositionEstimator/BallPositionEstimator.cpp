@@ -4,23 +4,19 @@
 
 namespace {
 
-// 以三個連續格點 v[0..2]（索引 i0..i0+2）做 log 拋物線擬合，求次格點峰值。
-// 峰值在邊緣時視窗往內移，等於用同側三點外推，不會像質心那樣把邊緣的球往內
-// 拉。擬合不成立時退回質心。結果限制在 peakIdx 附近 1 格內。
-float subCellPeak(const float v[3], int i0, int peakIdx) {
-    if (v[0] > 0 && v[1] > 0 && v[2] > 0) {
-        float lp = logf(v[0]), lc = logf(v[1]), ln = logf(v[2]);
-        float denom = lp - 2 * lc + ln;
-        if (denom < -1e-6f) {
-            float pos = (i0 + 1) + 0.5f * (lp - ln) / denom;
-            if (pos > peakIdx + 1) pos = (float)peakIdx + 1;
-            if (pos < peakIdx - 1) pos = (float)peakIdx - 1;
-            return pos;
+// 小陣列排序後取中位數（count <= 64）。
+float median(float* v, int count) {
+    for (int i = 1; i < count; i++) {
+        float key = v[i];
+        int j = i - 1;
+        while (j >= 0 && v[j] > key) {
+            v[j + 1] = v[j];
+            j--;
         }
+        v[j + 1] = key;
     }
-    float sum = v[0] + v[1] + v[2];
-    float wsum = v[0] * i0 + v[1] * (i0 + 1) + v[2] * (i0 + 2);
-    return sum > 1e-6f ? wsum / sum : (float)peakIdx;
+    return (count % 2) ? v[count / 2]
+                       : 0.5f * (v[count / 2 - 1] + v[count / 2]);
 }
 
 }  // namespace
@@ -38,79 +34,124 @@ BallEstimate BallPositionEstimator::estimate(
     int valid_zone_count) const {
     BallEstimate out;
     const int n = current_grid_size;
-    if (valid_zone_count <= 0 || n < 1 || n > MAX_GRID_SIZE) return out;
+    if (n < 1 || n > MAX_GRID_SIZE) return out;
+    if (valid_zone_count < (n == 8 ? 8 : 6)) return out;
 
-    // 找峰值並統計訊號範圍。
-    float minV = 999999.0f, maxV = -1.0f;
-    int px = -1, py = -1;
+    // 8x8 與 4x4 各用自己的一組參數（見 Config.h）。
+    const bool hi = n == 8;
+    const float spikeJump =
+        hi ? BALL_SPIKE_JUMP_LOG10_8X8 : BALL_SPIKE_JUMP_LOG10_4X4;
+    const float rise = hi ? BALL_RISE_LOG10_8X8 : BALL_RISE_LOG10_4X4;
+    const float minPeak =
+        hi ? BALL_MIN_PEAK_LOG10_8X8 : BALL_MIN_PEAK_LOG10_4X4;
+    const int minZones = hi ? BALL_MIN_ZONES_8X8 : BALL_MIN_ZONES_4X4;
+
+    // 1. 取 log10 強度。透明壓克力板的鏡面反射會讓正對感測器的那一格特別強，
+    //    球（漫反射）則是一整片偏強，所以用強度而不是距離判斷。
+    float logS[MAX_GRID_SIZE][MAX_GRID_SIZE];
+    bool ok[MAX_GRID_SIZE][MAX_GRID_SIZE];
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
-            float s = grid_strength[y][x];
-            if (s < minV) minV = s;
-            if (s > maxV) {
-                maxV = s;
-                px = x;
-                py = y;
+            ok[y][x] = grid_strength[y][x] > 0.0f;
+            logS[y][x] = ok[y][x] ? log10f(grid_strength[y][x]) : 0.0f;
+        }
+    }
+
+    // 2. 去除單點尖峰：比周圍有效區域的中位數高出 spikeJump 以上
+    //    的區域，視為板子的鏡面反射，以鄰居中位數取代。
+    float s[MAX_GRID_SIZE][MAX_GRID_SIZE];
+    for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+            s[y][x] = logS[y][x];
+            if (!ok[y][x]) continue;
+            float nb[8];
+            int cnt = 0;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int yy = y + dy, xx = x + dx;
+                    if ((dy == 0 && dx == 0) || yy < 0 || yy >= n || xx < 0 ||
+                        xx >= n || !ok[yy][xx])
+                        continue;
+                    nb[cnt++] = logS[yy][xx];
+                }
+            }
+            if (cnt >= 3) {
+                float med = median(nb, cnt);
+                if (logS[y][x] - med > spikeJump) s[y][x] = med;
             }
         }
     }
-    if (px < 0 || maxV - minV < 1e-6f) return out;  // 全平坦視為沒有球。
 
-    // 峰值附近的邊際和（各方向累加相鄰三列/行）以降低單點雜訊。
-    auto clampStart = [n](int peak) {
-        int i0 = peak - 1;
-        if (i0 > n - 3) i0 = n - 3;
-        if (i0 < 0) i0 = 0;
-        return i0;
-    };
-    int x0 = clampStart(px), y0 = clampStart(py);
-    // 底值避免背景格被減到 0，使 log 無法計算或放大雜訊。
-    const float floorV = 0.03f * (maxV - minV);
-    float colSum[3] = {floorV, floorV, floorV};
-    float rowSum[3] = {floorV, floorV, floorV};
-    for (int k = 0; k < 3; k++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            int yy = py + dy, cx = x0 + k;
-            if (yy >= 0 && yy < n && cx < n)
-                colSum[k] += grid_strength[yy][cx] - minV;
-        }
-        for (int dx = -1; dx <= 1; dx++) {
-            int xx = px + dx, cy = y0 + k;
-            if (xx >= 0 && xx < n && cy < n)
-                rowSum[k] += grid_strength[cy][xx] - minV;
-        }
-    }
-    out.gridX = subCellPeak(colSum, x0, px);
-    out.gridY = subCellPeak(rowSum, y0, py);
+    // 3. 背景強度取最低的 1/8 百分位（球可能佔掉相當比例的區域，尤其是 4x4），
+    //    門檻 = 背景 + rise，且不低於 minPeak（空板子的非尖峰區域都低於此值）。
+    float vals[MAX_GRID_SIZE * MAX_GRID_SIZE];
+    int nv = 0;
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++)
+            if (ok[y][x]) vals[nv++] = s[y][x];
+    float tmp[MAX_GRID_SIZE * MAX_GRID_SIZE];
+    for (int i = 0; i < nv; i++) tmp[i] = vals[i];
+    median(tmp, nv);  // 就地排序，借用來取百分位。
+    float base = tmp[nv / 8];
+    float thr = base + rise;
+    if (thr < minPeak) thr = minPeak;
 
-    // 球附近的平均距離，以去背景後的訊號強度加權。
-    float dsum = 0, wsum = 0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int x = px + dx, y = py + dy;
-            if (x < 0 || x >= n || y < 0 || y >= n) continue;
-            if (grid_dist[y][x] <= 0) continue;
-            float w = grid_strength[y][x] - minV;
-            dsum += w * grid_dist[y][x];
-            wsum += w;
-        }
-    }
-    if (wsum > 1e-6f) {
-        out.distMm = dsum / wsum;
-    } else {
-        // 視窗內沒有有效距離時，改用所有有效區域的平均。
-        float s = 0;
-        int c = 0;
-        for (int y = 0; y < n; y++)
-            for (int x = 0; x < n; x++)
-                if (grid_dist[y][x] > 0) {
-                    s += grid_dist[y][x];
-                    c++;
+    // 4. 找出超過門檻的最大 4 連通區塊。
+    int label[MAX_GRID_SIZE][MAX_GRID_SIZE];
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) label[y][x] = -1;
+    int bestId = -1, bestSize = 0, nextId = 0;
+    for (int y0 = 0; y0 < n; y0++) {
+        for (int x0 = 0; x0 < n; x0++) {
+            if (!ok[y0][x0] || s[y0][x0] <= thr || label[y0][x0] >= 0) continue;
+            int stack[MAX_GRID_SIZE * MAX_GRID_SIZE];
+            int sp = 0, size = 0;
+            stack[sp++] = y0 * n + x0;
+            label[y0][x0] = nextId;
+            while (sp > 0) {
+                int cur = stack[--sp];
+                int cy = cur / n, cx = cur % n;
+                size++;
+                const int dys[4] = {1, -1, 0, 0};
+                const int dxs[4] = {0, 0, 1, -1};
+                for (int k = 0; k < 4; k++) {
+                    int yy = cy + dys[k], xx = cx + dxs[k];
+                    if (yy < 0 || yy >= n || xx < 0 || xx >= n) continue;
+                    if (!ok[yy][xx] || s[yy][xx] <= thr || label[yy][xx] >= 0)
+                        continue;
+                    label[yy][xx] = nextId;
+                    stack[sp++] = yy * n + xx;
                 }
-        if (c == 0) return out;
-        out.distMm = s / c;
+            }
+            if (size > bestSize) {
+                bestSize = size;
+                bestId = nextId;
+            }
+            nextId++;
+        }
     }
+    if (bestId < 0 || bestSize < minZones) return out;
 
+    // 5. 以（強度 - 門檻）加權求球中心與平均距離。
+    float sw = 0, gx = 0, gy = 0, dsum = 0, dw = 0;
+    for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+            if (label[y][x] != bestId) continue;
+            float w = s[y][x] - thr;
+            sw += w;
+            gx += x * w;
+            gy += y * w;
+            if (grid_dist[y][x] > 0) {
+                dsum += grid_dist[y][x] * w;
+                dw += w;
+            }
+        }
+    }
+    if (sw <= 0 || dw <= 0) return out;
+
+    out.gridX = gx / sw;
+    out.gridY = gy / sw;
+    out.distMm = dsum / dw;
     out.xMm = gridToMm(out.gridX, n, out.distMm);
     out.yMm = gridToMm(out.gridY, n, out.distMm);
     out.valid = true;

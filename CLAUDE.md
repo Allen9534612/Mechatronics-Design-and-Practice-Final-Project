@@ -42,7 +42,7 @@ There is no test suite or linter configured in this repo.
 - `include/Config.h`：**全專案唯一的設定來源**（I2C 腳位：VL53L7CX 用 `Wire` SDA=22/SCL=21、PCA9685 用獨立的 `Wire1` SDA=18/SCL=19；VL53L7CX 參數與篩選門檻、感測器座標旋轉/翻轉、PCA9685 與伺服脈寬、伺服校正 `SERVO_CAL_DEFAULT`、平台機構尺寸、`MAX_TILT_DEG`、PID 預設增益等）。`src/main.cpp` 與所有 `lib/*` 都 include 它，不要在其他檔案重複定義常數。
 - 資料流（`src/main.cpp` 的 `loop()`，`CONTROL_PERIOD_MS` 週期）：
   1. `lib/IRSensorArray`：透過 I2C 驅動 VL53L7CX，`readData()` 取得 4x4/8x8 的 `grid_strength`、`grid_dist`（無效區域為 0）與有效區域數；`changeResolution(4|8)` 切換解析度。
-  2. `lib/BallPositionEstimator`：`estimate()` 回傳 `BallEstimate{valid, gridX, gridY, distMm, xMm, yMm}`。先找峰值，再用三點 log 拋物線求次格點位置（邊緣峰值同側外推，不在邊界外補值），距離取球附近以訊號強度加權的平均；`gridToMm()` 依 `TOF_FOV_DEG`（60°）與距離把格點換算成 mm，原點在感測器視野中心（+x 向右、+y 向下）。
+  2. `lib/BallPositionEstimator`：`estimate()` 回傳 `BallEstimate{valid, gridX, gridY, distMm, xMm, yMm}`。透過壓克力板量測時板子是鏡面、距離不可靠，所以改用「訊號強度區塊」：強度取 log10 → 去除單點鏡面尖峰（比 8 鄰居中位數高 `SPIKE_JUMP`）→ 背景取最低 1/8 的強度，門檻 = max(背景 + `RISE`, `MIN_PEAK`) → 取最大的 4 連通區塊（至少 `MIN_ZONES` 個區域）→ 強度加權重心；距離取區塊內加權平均。8x8 與 4x4 各一組參數（`Config.h` 的 `BALL_*_8X8/_4X4`）。`gridToMm()` 依 `TOF_FOV_DEG`（60°）與距離把格點換算成 mm，原點在感測器視野中心（+x 向右、+y 向下）。
   3. `main.cpp` 的 `sensorToPlatform()`：套用 `SENSOR_ROTATION_DEG` / `SENSOR_FLIP_X/Y`，轉成平台座標（mm）。
   4. `lib/BalanceController`：PID，**輸入 mm（與目標點的誤差）、輸出傾角度數**；kp=度/mm、ki=度/(mm·s)、kd=度/(mm/s)；輸出 `theta`（傾角）與 `phi`（往下傾的方向）。
   5. `lib/PlatformKinematics`：移植自 I-M-Robotics-Lab/Ball-Balancing-Robot 的三軸逆向運動學，`solveSpherical(theta, phi, h, modelDeg[3])` 與 `computeMaxTilt(h)`。
@@ -94,3 +94,8 @@ There is no test suite or linter configured in this repo.
 - 2026-10-23：GUI 的「傾斜測試」改為「伺服角度與原點」：三顆伺服各一組 +/-（步進 0.5°/1°/2°，滾輪與按住連發可用，限制在 `SERVO_MIN_DEG~SERVO_MAX_DEG`），調整時送 `d`；「寫入原點」（需直接角度模式，3 秒內再按一次確認）送 `o`，「還原」送 `o r`。韌體新增 `d`、`o` 指令與開機載入（見上方「伺服原點校正」）。傾斜指令 `t` 仍可從指令輸入框使用。host mock 測試新增 `Preferences` 與 d/o 情境（共 1177 項）、GUI 互動測試 33 項、短版隨機測試通過；`pio run -e esp32` 通過。**尚未用實體 PCA9685 驗證**：原點寫入的實際儲存與斷電保留需接上馬達後確認。
 - 2026-10-23：開機預設改為「回水平、不自動平衡」：`setup()` 套用已儲存的原點後停在水平（`MODE_TILT`、θ=0），即使視野內有球也不會動，要輸入 `r`（或 GUI 的「自動平衡」）才開始 PID；`Config.h` 新增 `AUTO_BALANCE_AT_BOOT`（預設 false，設 true 則開機直接自動平衡）。GUI 的 `--demo` 模擬器同步改為開機水平。host mock 測試更新為 1180 項。
 - 2026-10-23：反轉伺服輸出方向（正向角度原本使連桿向下）：只把 `Config.h` 的 `SERVO_CAL_DEFAULT` 三顆伺服的 `gain` 從 +1 改成 −1（`伺服角度 = neutral + gain × (模型角 − 水平模型角) + offset`），運動學（`PlatformKinematics`）完全沒動，水平時模型角差為 0，所以水平原點與已儲存的 offset 都不受影響。`d` 直接角度指令與 GUI 的伺服角度仍是實際的伺服度數（正向＝連桿向下，未反轉）。只用 host 假 PCA9685 輸出驗證（未動實體裝置、未上傳）：t 5 0 時腳 2 伺服 −8.03°、腳 1/3 各 +4.29°（原本相反）；在整個可達範圍內伺服角度 = neutral − (模型角 − 水平) + offset 且都在上下限內；假 PWM 計數與角度吻合；原點寫入/回水平不變；對照實驗確認 gain=+1 時新測試會失敗。host mock 測試共 1204 項。**上傳後請先用小角度實機確認方向，再放心使用。**
+- 2026-10-23：球偵測改為「強度區塊」演算法（取代 log 拋物線峰值）。實測壓克力板是鏡面：軸心附近單一區域有 10^4~10^5 kcps/spad 的尖峰、其餘很弱，距離受 range-walk 影響不可靠且不隨球變化；球（漫反射）則是一片明顯的強度區塊（8x8 約 10^3.1~10^3.9）。感測器已架高、框架不在視野內。
+  - `BallPositionEstimator` 重寫（見上方 Architecture）；`Config.h` 新增 `BALL_SPIKE_JUMP/RISE/MIN_PEAK/MIN_ZONES`，8x8 與 4x4 分開（4x4 `MIN_PEAK`=2.7：空板子去除尖峰後最強 10^2.54，球最弱區域 10^2.88；8x8 為 2.9）。強度篩選放寬（`TOF_FILTER_MAX_STRENGTH`=1000000、`MIN_DISTANCE`=10），尖峰交由估測器處理。
+  - 驗證（實機 COM4，暫時上傳診斷韌體，馬達只在原點 ±10° 內、不自動平衡）：空板子水平與 7 種傾斜姿態共 8x8 138 幀、4x4 270 幀皆無誤報；球在中心 8x8 28/28 幀偵測到、位置 (3.34, 4.23) 標準差約 0.01 格，4x4 72/72 幀、(1.45, 2.00)。實錄幀用 host mock 重播（共 204 項測試通過），`pio run -e esp32` 通過。
+  - 撤回：先前說「xtalk margin 可能有用」不對（那是校正前蓋很近的玻璃用的，板子在約 50 mm 外沒效果）。
+  - 已知/待辦：球在板子正中央時估測不在視野中心（8x8 約 (3.34, 4.23)、4x4 約 (1.45, 2.00)；感測器軸心與板中心有偏移），需用目標點 `g x y` 校正；球偏離中心時的方向/比例尚未實機驗證（球在板上不要傾斜）；mm 換算用的距離有 range-walk 偏差，比例只是近似；感測器位置變動後要重驗門檻。開發板目前可能仍是診斷韌體，請自行上傳正式版。
