@@ -64,7 +64,7 @@ static constexpr int BALL_MIN_ZONES_4X4 = 2;
 
 // 感測器座標轉平台座標：先翻轉，再逆時針旋轉。
 static constexpr float SENSOR_ROTATION_DEG = 0.0f;
-static constexpr bool SENSOR_FLIP_X = false;
+static constexpr bool SENSOR_FLIP_X = true;
 static constexpr bool SENSOR_FLIP_Y = false;
 
 // PCA9685 與伺服脈寬。
@@ -111,6 +111,6 @@ static constexpr float BALANCE_TARGET_Y = 0.0f;
 static constexpr float PID_KP = 0.12f;
 static constexpr float PID_KI = 0.01f;
 static constexpr float PID_KD = 0.06f;
-static constexpr float PID_OUTPUT_ALPHA = 0.65f;       // 輸出低通，1 = 不濾波。
+static constexpr float PID_OUTPUT_ALPHA = 1.0f;        // 輸出低通，1 = 不濾波。
 static constexpr float PID_D_ALPHA = 0.5f;             // 微分項低通。
 static constexpr float PID_INTEGRAL_LIMIT_DEG = 3.0f;  // 積分項貢獻上限。
