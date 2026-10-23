@@ -37,6 +37,9 @@ BAUD_RATE = 115200
 SERVO_MIN_DEG = 40.0
 SERVO_MAX_DEG = 140.0
 SERVO_CHANNELS = (0, 1, 2)
+SENSOR_ROTATION_DEG = 0.0
+SENSOR_FLIP_X = True
+SENSOR_FLIP_Y = False
 # 平台高度範圍（mm），由 PlatformKinematics 的 minHeight/maxHeight 算出，
 # 需與機構尺寸一致；超出範圍韌體會拒絕。
 HEIGHT_MIN_MM = 61.0
@@ -1315,12 +1318,18 @@ class App:
                     side * 0.36 * min(stat["theta"] / max(stat["max_tilt"], 1e-3), 1)
                     + 10 * s
                 )
-                ph = math.radians(stat["phi"])
+                # phi 是平台座標，熱圖是感測器座標，所以反向套用旋轉與翻轉。
+                ph = math.radians(stat["phi"] - SENSOR_ROTATION_DEG)
+                ax, ay = math.cos(ph), math.sin(ph)
+                if SENSOR_FLIP_X:
+                    ax = -ax
+                if SENSOR_FLIP_Y:
+                    ay = -ay
                 r.arrow(
                     cx,
                     cy,
-                    cx + L * math.cos(ph),
-                    cy + L * math.sin(ph),
+                    cx + L * ax,
+                    cy + L * ay,
                     3 * s,
                     TEXT,
                     12 * s,
