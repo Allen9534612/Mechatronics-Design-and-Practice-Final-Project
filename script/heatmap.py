@@ -361,7 +361,7 @@ class DemoLink:
         self.running = True
         self.lock = threading.Lock()
         self.n = 4
-        self.mode = 0
+        self.mode = 1  # 與韌體一致：開機是水平，不自動平衡。
         self.kp, self.ki, self.kd = 0.12, 0.01, 0.06
         self.tx = self.ty = 0.0
         self.height = 82.6
