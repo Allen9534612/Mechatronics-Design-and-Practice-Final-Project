@@ -3,6 +3,7 @@
 // 並接受文字指令（輸入 ? 查看）。
 
 #include <Arduino.h>
+#include <Preferences.h>
 
 #include "BalanceController.h"
 #include "BallPositionEstimator.h"
@@ -47,6 +48,7 @@ float tiltPhi = 0.0f;
 BallReading manualBall = {false, 0.0f, 0.0f};
 BallReading irBall = {false, 0.0f, 0.0f};
 bool servoReady = false;  // PCA9685 是否偵測到。
+Preferences prefs;
 float lastDistMm = 0.0f;  // 供 STAT 回報。
 int lastValidZones = 0;
 
@@ -91,6 +93,41 @@ bool applyTilt(float thetaDeg, float phiDeg) {
     return true;
 }
 
+// 平台水平時的伺服角度 = neutral + offset。offset 可寫入 ESP32 的非揮發記憶體
+// （NVS），斷電後保留；沒有儲存值時使用 Config.h 的 SERVO_CAL_DEFAULT。
+void loadServoOrigin() {
+    if (!prefs.begin("servo", true)) return;
+    bool loaded = false;
+    for (int i = 0; i < 3; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "off%d", i);
+        float off = prefs.getFloat(key, NAN);
+        if (!isnan(off)) {
+            servoCal[i].offset = off;
+            loaded = true;
+        }
+    }
+    prefs.end();
+    if (loaded) Serial.println("已載入儲存的伺服原點");
+}
+
+bool saveServoOrigin() {
+    if (!prefs.begin("servo", false)) return false;
+    for (int i = 0; i < 3; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "off%d", i);
+        prefs.putFloat(key, servoCal[i].offset);
+    }
+    prefs.end();
+    return true;
+}
+
+void clearServoOrigin() {
+    if (!prefs.begin("servo", false)) return;
+    prefs.clear();
+    prefs.end();
+}
+
 void printHelp() {
     Serial.println();
     Serial.println("========== 指令（單位：mm、度）==========");
@@ -106,6 +143,11 @@ void printHelp() {
     Serial.println(
         "  a a1 a2 a3   設定三顆伺服角度（會加上各自 offset，a 90 90 90 = "
         "水平）");
+    Serial.println(
+        "  d a1 a2 a3   直接設定三顆伺服的實際角度（不加 offset），校正水平用");
+    Serial.println(
+        "  o            把目前 d 指令的角度寫入為水平原點（斷電保留）；o r "
+        "還原");
     Serial.println(
         "  c 腳 neutral [gain] [offset]   設定伺服校正，例：c 2 92 1 0");
     Serial.println(
@@ -343,6 +385,54 @@ void handleCommand(char* line) {
                 Serial.println(">> 格式：a 角度1 角度2 角度3");
             break;
 
+        case 'd':  // 直接設定三顆伺服的實際角度（不加 offset），校正水平用。
+            if (parseNumbers(tok, n, 1, 3, v)) {
+                for (int i = 0; i < 3; i++) {
+                    if (v[i] < servoCal[i].minDeg ||
+                        v[i] > servoCal[i].maxDeg) {
+                        Serial.printf(
+                            ">> 錯誤：腳 %d 角度需在 %.0f ~ %.0f 之間\n", i + 1,
+                            servoCal[i].minDeg, servoCal[i].maxDeg);
+                        return;
+                    }
+                }
+                mode = MODE_RAW;
+                manualBall.present = false;
+                writeServos(v);
+                Serial.printf(
+                    ">> 直接角度 %.1f / %.1f / %.1f（PCA9685 計數 %u / %u / "
+                    "%u）\n",
+                    v[0], v[1], v[2], motors.ticksOf(SERVO_CHANNEL[0]),
+                    motors.ticksOf(SERVO_CHANNEL[1]),
+                    motors.ticksOf(SERVO_CHANNEL[2]));
+            } else
+                Serial.println(">> 格式：d 角度1 角度2 角度3");
+            break;
+
+        case 'o':  // 寫入平台水平的原點；o r 還原預設。
+            if (n >= 2 && tolower(tok[1][0]) == 'r') {
+                for (int i = 0; i < 3; i++)
+                    servoCal[i].offset = SERVO_CAL_DEFAULT[i].offset;
+                clearServoOrigin();
+                if (mode == MODE_TILT) applyTilt(tiltTheta, tiltPhi);
+                Serial.println(">> 已還原預設原點並清除儲存值");
+            } else if (mode != MODE_RAW) {
+                Serial.println(">> 請先用 d 指令把平台調到水平，再寫入原點");
+            } else if (!servoReady) {
+                Serial.println(">> 未偵測到 PCA9685，無法確認平台是否水平");
+            } else {
+                for (int i = 0; i < 3; i++)
+                    servoCal[i].offset = lastServo[i] - servoCal[i].neutral;
+                bool saved = saveServoOrigin();
+                Serial.printf(
+                    ">> 原點已寫入%s：水平角度 %.1f / %.1f / %.1f，offset %.1f "
+                    "/ %.1f / %.1f（可抄回 Config.h 的 SERVO_CAL_DEFAULT）\n",
+                    saved ? "（斷電保留）" : "（儲存失敗，僅本次有效）",
+                    lastServo[0], lastServo[1], lastServo[2],
+                    servoCal[0].offset, servoCal[1].offset, servoCal[2].offset);
+            }
+            break;
+
         case 'c': {
             float leg, neutral;
             if (n < 3 || !parseNumber(tok[1], leg) ||
@@ -459,6 +549,7 @@ void setup() {
         while (1) delay(1000);
     }
     maxTilt = min(kinematics.computeMaxTilt(height), MAX_TILT_DEG);
+    loadServoOrigin();
 
     Serial.println("Servo system ready!");
     Serial.printf("水平時模型角: %.2f / %.2f / %.2f，最大傾角 %.1f 度\n",
