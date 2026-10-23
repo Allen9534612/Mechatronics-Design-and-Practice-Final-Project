@@ -90,9 +90,9 @@ struct ServoCal {
 // neutral 統一為 90，各馬達的差異以 offset 補償。gain 為 -1：伺服角度增加時
 // 連桿向下，與運動學的模型角方向相反，所以反轉輸出（不影響水平原點）。
 static constexpr ServoCal SERVO_CAL_DEFAULT[3] = {
-    {90.0f, -1.0f, 0.0f, 40.0f, 140.0f},
-    {90.0f, -1.0f, -4.5f, 40.0f, 140.0f},
-    {90.0f, -1.0f, -4.0f, 40.0f, 140.0f},
+    {90.0f, -1.0f, 26.0f, 40.0f, 140.0f},
+    {90.0f, -1.0f, 22.5f, 40.0f, 140.0f},
+    {90.0f, -1.0f, 25.0f, 40.0f, 140.0f},
 };
 
 // 平台機構尺寸，符號對應 PlatformKinematics。MAX_TILT_DEG 會再與運動學
@@ -109,8 +109,8 @@ static constexpr float MAX_TILT_DEG = 15.0f;
 static constexpr float BALANCE_TARGET_X = 0.0f;
 static constexpr float BALANCE_TARGET_Y = 0.0f;
 static constexpr float PID_KP = 0.12f;
-static constexpr float PID_KI = 0.01f;
-static constexpr float PID_KD = 0.06f;
-static constexpr float PID_OUTPUT_ALPHA = 1.0f;        // 輸出低通，1 = 不濾波。
-static constexpr float PID_D_ALPHA = 0.5f;             // 微分項低通。
-static constexpr float PID_INTEGRAL_LIMIT_DEG = 3.0f;  // 積分項貢獻上限。
+static constexpr float PID_KI = 0.00f;
+static constexpr float PID_KD = 0.00f;
+static constexpr float PID_OUTPUT_ALPHA = 0.85f;       // 輸出低通，1 = 不濾波。
+static constexpr float PID_D_ALPHA = 0.7f;             // 微分項低通。
+static constexpr float PID_INTEGRAL_LIMIT_DEG = 2.0f;  // 積分項貢獻上限。
