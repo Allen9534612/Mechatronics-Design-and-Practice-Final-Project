@@ -68,11 +68,12 @@ struct ServoCal {
     float maxDeg;
 };
 
-// neutral 統一為 90，各馬達的差異以 offset 補償。
+// neutral 統一為 90，各馬達的差異以 offset 補償。gain 為 -1：伺服角度增加時
+// 連桿向下，與運動學的模型角方向相反，所以反轉輸出（不影響水平原點）。
 static constexpr ServoCal SERVO_CAL_DEFAULT[3] = {
-    {90.0f, 1.0f, 0.0f, 40.0f, 140.0f},
-    {90.0f, 1.0f, -4.5f, 40.0f, 140.0f},
-    {90.0f, 1.0f, -4.0f, 40.0f, 140.0f},
+    {90.0f, -1.0f, 0.0f, 40.0f, 140.0f},
+    {90.0f, -1.0f, -4.5f, 40.0f, 140.0f},
+    {90.0f, -1.0f, -4.0f, 40.0f, 140.0f},
 };
 
 // 平台機構尺寸，符號對應 PlatformKinematics。MAX_TILT_DEG 會再與運動學
