@@ -11,10 +11,14 @@ static constexpr uint32_t CONTROL_PERIOD_MS = 20;
 static constexpr uint32_t STAT_PERIOD_MS = 100;
 static constexpr bool USE_IR_SENSOR = true;
 
-// I2C 匯流排，PCA9685 與 VL53L7CX 共用。
-static constexpr uint8_t I2C_SDA_PIN = 22;
-static constexpr uint8_t I2C_SCL_PIN = 21;
-static constexpr uint32_t I2C_FREQ_HZ = 400000;
+// I2C 匯流排：VL53L7CX 使用 Wire，PCA9685 使用獨立的 Wire1，避免伺服的雜訊
+// 與傳輸時間影響感測器。
+static constexpr uint8_t TOF_I2C_SDA_PIN = 22;
+static constexpr uint8_t TOF_I2C_SCL_PIN = 21;
+static constexpr uint32_t TOF_I2C_FREQ_HZ = 400000;
+static constexpr uint8_t SERVO_I2C_SDA_PIN = 18;
+static constexpr uint8_t SERVO_I2C_SCL_PIN = 19;
+static constexpr uint32_t SERVO_I2C_FREQ_HZ = 400000;
 
 // VL53L7CX。TOF_LPN_PIN 沒接線時為 -1；TOF_FOV_DEG 為單邊視角。
 static constexpr uint8_t TOF_I2C_ADDRESS = 0x29;

@@ -39,14 +39,14 @@ There is no test suite or linter configured in this repo.
 ## Architecture
 
 - `platformio.ini`：`esp32`（預設，`nodemcu-32s`）依賴 ESP32Servo、Adafruit PWM Servo Driver、stm32duino/VL53L7CX；`mega`/`uno` 僅保留設定，現有程式碼只能在 esp32 編譯。`[env] build_flags = -Iinclude` 讓 `lib/*` 也能 `#include "Config.h"`。
-- `include/Config.h`：**全專案唯一的設定來源**（I2C 腳位 SDA=22/SCL=21、VL53L7CX 參數與篩選門檻、感測器座標旋轉/翻轉、PCA9685 與伺服脈寬、伺服校正 `SERVO_CAL_DEFAULT`、平台機構尺寸、`MAX_TILT_DEG`、PID 預設增益等）。`src/main.cpp` 與所有 `lib/*` 都 include 它，不要在其他檔案重複定義常數。
+- `include/Config.h`：**全專案唯一的設定來源**（I2C 腳位：VL53L7CX 用 `Wire` SDA=22/SCL=21、PCA9685 用獨立的 `Wire1` SDA=18/SCL=19；VL53L7CX 參數與篩選門檻、感測器座標旋轉/翻轉、PCA9685 與伺服脈寬、伺服校正 `SERVO_CAL_DEFAULT`、平台機構尺寸、`MAX_TILT_DEG`、PID 預設增益等）。`src/main.cpp` 與所有 `lib/*` 都 include 它，不要在其他檔案重複定義常數。
 - 資料流（`src/main.cpp` 的 `loop()`，`CONTROL_PERIOD_MS` 週期）：
   1. `lib/IRSensorArray`：透過 I2C 驅動 VL53L7CX，`readData()` 取得 4x4/8x8 的 `grid_strength`、`grid_dist`（無效區域為 0）與有效區域數；`changeResolution(4|8)` 切換解析度。
   2. `lib/BallPositionEstimator`：`estimate()` 回傳 `BallEstimate{valid, gridX, gridY, distMm, xMm, yMm}`。先找峰值，再用三點 log 拋物線求次格點位置（邊緣峰值同側外推，不在邊界外補值），距離取球附近以訊號強度加權的平均；`gridToMm()` 依 `TOF_FOV_DEG`（60°）與距離把格點換算成 mm，原點在感測器視野中心（+x 向右、+y 向下）。
   3. `main.cpp` 的 `sensorToPlatform()`：套用 `SENSOR_ROTATION_DEG` / `SENSOR_FLIP_X/Y`，轉成平台座標（mm）。
   4. `lib/BalanceController`：PID，**輸入 mm（與目標點的誤差）、輸出傾角度數**；kp=度/mm、ki=度/(mm·s)、kd=度/(mm/s)；輸出 `theta`（傾角）與 `phi`（往下傾的方向）。
   5. `lib/PlatformKinematics`：移植自 I-M-Robotics-Lab/Ball-Balancing-Robot 的三軸逆向運動學，`solveSpherical(theta, phi, h, modelDeg[3])` 與 `computeMaxTilt(h)`。
-  6. `lib/ServoMotor`：透過 PCA9685 輸出 PWM，`setAngle(channel, angle)`。
+  6. `lib/ServoMotor`：透過 PCA9685（接在 `Wire1`，與感測器分開的匯流排）輸出 PWM，`setAngle(channel, angle)`。
   `main.cpp` 的 `modelToServo()` 依 `servoCal`（neutral/gain/offset/限幅）把模型角轉成伺服角。`maxTilt = min(運動學可達最大傾角, MAX_TILT_DEG)`。
 - 序列埠：`DATA,<N>,<N*N 個距離>,<gridX>,<gridY>` 供 `script/heatmap.py` 使用，**gridX/gridY 維持格點座標、無球為 -1**；指令列表輸入 `?` 查看。
 - 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。韌體不再週期性輸出人類可讀狀態列，指令回覆（`>>` 開頭）與 `s` 指令仍保留。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
@@ -89,3 +89,4 @@ There is no test suite or linter configured in this repo.
 - 2026-10-22（更正）：先前「8×8 近距離偵測不到、是感測器限制」的結論**不正確**。真正原因是 VL53L7CX 的銳化（sharpener，預設約 14%）把互相重疊的近距離目標（壓克力板與球靠得很近）標成狀態碼 12（被另一個目標模糊）而被篩選丟棄；8×8 區域更小、重疊更嚴重，所以幾乎全滅。實測（COM4，暫時上傳可即時調參與輸出所有目標的診斷韌體，測完已還原）：銳化 0% 時 4×4 近距離目標有效率 45%→99%（16/16 區域）、8×8 6%→100%（64/64 區域），各區域距離標準差約 1~1.5 mm；積分時間、解析度切換流程、串擾邊限皆非主因。已在 `Config.h` 新增 `TOF_SHARPENER_PERCENT = 0` 並於 `IRSensorArray::begin()` 設定（切換解析度後設定會保留）。
   - 現場量測（感測器在壓克力板下方、乒乓球在板上正中心）：有球與無球的距離分布幾乎相同，球只讓中間幾格增加約 10~40 mm；邊緣與四角有穩定的強反射（無球時 8×8 角落約 19~28 mm、強度 1 萬~3 萬 kcps/spad），判斷為視野內有其他零件，需把感測器裝高，使 60°×60° 視野內只剩壓克力板。目前估測器以訊號強度找峰值，會被邊緣強反射拉偏（球在中心時 4×4 估到約 (0.38, 1.91)，中心為 (1.5, 1.5)）。
   - 待辦/建議：感測器裝高後重測（驗收標準：無球時邊緣區域距離應大於中心、無強度 >1000 的熱點）；或改用「背景相減」（無球時學習每區域的距離/強度，之後以偏離量找球），可抵銷固定反射。
+- 2026-10-23：PCA9685 改接獨立的 I2C 匯流排（`Wire1`，SDA=18、SCL=19），VL53L7CX 維持在 `Wire`（SDA=22、SCL=21）。`Config.h` 的 `I2C_SDA_PIN/I2C_SCL_PIN/I2C_FREQ_HZ` 拆成 `TOF_I2C_*` 與 `SERVO_I2C_*`；`ServoMotor` 建構子新增 `TwoWire& bus`（預設 `Wire1`），探測與 `begin()` 都改走該匯流排；Adafruit 函式庫內部再呼叫的 `Wire1.begin()` 在匯流排已啟動時只會警告、不會改變腳位。host mock 測試新增「雙匯流排」情境（腳位/時脈正確、伺服匯流排失效時感測器照常輸出，共 1155 項），`pio run -e esp32` 通過。**需要實體接線配合：PCA9685 的 SDA 接 GPIO18、SCL 接 GPIO19，並與 ESP32 共地；尚未用實體 PCA9685 驗證。**

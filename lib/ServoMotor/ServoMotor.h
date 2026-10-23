@@ -10,10 +10,14 @@
 // 透過 PCA9685 驅動角度伺服。
 class ServoMotor {
 public:
-    explicit ServoMotor(uint8_t address = PCA9685_ADDRESS);
+    // PCA9685 預設接在獨立的 Wire1，不與感測器共用匯流排。
+    explicit ServoMotor(uint8_t address = PCA9685_ADDRESS,
+                        TwoWire& bus = Wire1);
 
-    // 初始化 I2C 與 PCA9685。找不到裝置時回傳 false。
-    bool begin(uint8_t sdaPin = I2C_SDA_PIN, uint8_t sclPin = I2C_SCL_PIN,
+    // 初始化 I2C 與 PCA9685。找不到裝置時回傳 false。frequency 為伺服 PWM
+    // 頻率，不是 I2C 時脈。
+    bool begin(uint8_t sdaPin = SERVO_I2C_SDA_PIN,
+               uint8_t sclPin = SERVO_I2C_SCL_PIN,
                uint16_t frequency = SERVO_PWM_FREQ_HZ);
 
     // 角度限制在 0~180 度。
@@ -30,6 +34,7 @@ public:
     bool setPulseRange(uint8_t channel, uint16_t minUs, uint16_t maxUs);
 
 private:
+    TwoWire& i2c;
     Adafruit_PWMServoDriver pwm;
     uint8_t i2cAddress;
     bool initialized = false;

@@ -444,7 +444,8 @@ void setup() {
     delay(1000);  // 等序列埠連線穩定。
 
     // 沒接 PCA9685 時只停用伺服輸出，感測、估測與 PID 照常執行。
-    servoReady = motors.begin(I2C_SDA_PIN, I2C_SCL_PIN, SERVO_PWM_FREQ_HZ);
+    servoReady =
+        motors.begin(SERVO_I2C_SDA_PIN, SERVO_I2C_SCL_PIN, SERVO_PWM_FREQ_HZ);
     if (!servoReady) {
         Serial.println("PCA9685 未偵測到，伺服輸出停用（仍可讀取感測器資料）");
     }

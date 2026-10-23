@@ -29,8 +29,8 @@ void IRSensorArray::changeResolution(int new_size) {
 void IRSensorArray::begin() {
     Serial.println("初始化 VL53L7CX 韌體中...");
 
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-    Wire.setClock(I2C_FREQ_HZ);
+    Wire.begin(TOF_I2C_SDA_PIN, TOF_I2C_SCL_PIN);
+    Wire.setClock(TOF_I2C_FREQ_HZ);
 
     sensor.begin();
 
@@ -38,12 +38,12 @@ void IRSensorArray::begin() {
     int bus_status = Wire.endTransmission();
     if (bus_status != 0) {
         Serial.printf("在 SDA=GPIO%d / SCL=GPIO%d 找不到 I2C 裝置 0x%02X\n",
-                      I2C_SDA_PIN, I2C_SCL_PIN, TOF_I2C_ADDRESS);
+                      TOF_I2C_SDA_PIN, TOF_I2C_SCL_PIN, TOF_I2C_ADDRESS);
         halt("請檢查電源與接線", bus_status);
     }
 
     Serial.printf("在 SDA=GPIO%d / SCL=GPIO%d 偵測到 I2C 裝置 0x%02X\n",
-                  I2C_SDA_PIN, I2C_SCL_PIN, TOF_I2C_ADDRESS);
+                  TOF_I2C_SDA_PIN, TOF_I2C_SCL_PIN, TOF_I2C_ADDRESS);
 
     int status = sensor.init_sensor();
     if (status != 0) halt("找不到感測器或韌體載入失敗", status);

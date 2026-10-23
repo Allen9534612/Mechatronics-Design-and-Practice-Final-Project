@@ -1,6 +1,7 @@
 #include "ServoMotor.h"
 
-ServoMotor::ServoMotor(uint8_t address) : pwm(address), i2cAddress(address) {
+ServoMotor::ServoMotor(uint8_t address, TwoWire& bus)
+    : i2c(bus), pwm(address, bus), i2cAddress(address) {
     for (int i = 0; i < 16; i++) {
         pulseMin[i] = SERVO_MIN_US;
         pulseMax[i] = SERVO_MAX_US;
@@ -8,11 +9,12 @@ ServoMotor::ServoMotor(uint8_t address) : pwm(address), i2cAddress(address) {
 }
 
 bool ServoMotor::begin(uint8_t sdaPin, uint8_t sclPin, uint16_t frequency) {
-    Wire.begin(sdaPin, sclPin);
+    i2c.begin(sdaPin, sclPin);
+    i2c.setClock(SERVO_I2C_FREQ_HZ);
 
     // pwm.begin() 不檢查裝置是否存在，所以先探測。
-    Wire.beginTransmission(i2cAddress);
-    if (Wire.endTransmission() != 0) {
+    i2c.beginTransmission(i2cAddress);
+    if (i2c.endTransmission() != 0) {
         initialized = false;
         return false;
     }
