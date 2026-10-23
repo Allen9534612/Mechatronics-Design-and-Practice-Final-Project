@@ -555,12 +555,11 @@ void setup() {
     Serial.printf("水平時模型角: %.2f / %.2f / %.2f，最大傾角 %.1f 度\n",
                   levelModel[0], levelModel[1], levelModel[2], maxTilt);
 
+    // 開機先回水平；是否自動平衡由 AUTO_BALANCE_AT_BOOT 決定。
+    tiltTheta = tiltPhi = 0;
     applyTilt(0, 0);
-
-    if (USE_IR_SENSOR) {
-        pid.reset();
-        mode = MODE_BALL;
-    }
+    pid.reset();
+    mode = (USE_IR_SENSOR && AUTO_BALANCE_AT_BOOT) ? MODE_BALL : MODE_TILT;
 
     printHelp();
 }

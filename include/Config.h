@@ -11,6 +11,10 @@ static constexpr uint32_t CONTROL_PERIOD_MS = 20;
 static constexpr uint32_t STAT_PERIOD_MS = 100;
 static constexpr bool USE_IR_SENSOR = true;
 
+// 開機後的預設姿態是水平（使用已儲存的原點），不會自動開始平衡；要平衡時
+// 輸入 r（或按 GUI 的「自動平衡」）。設為 true 則開機後直接進入自動平衡。
+static constexpr bool AUTO_BALANCE_AT_BOOT = false;
+
 // I2C 匯流排：VL53L7CX 使用 Wire，PCA9685 使用獨立的 Wire1，避免伺服的雜訊
 // 與傳輸時間影響感測器。
 static constexpr uint8_t TOF_I2C_SDA_PIN = 22;
