@@ -1002,8 +1002,8 @@ HINTS = {
     "height": "平台中心高度（mm）。會改變最大傾角，超出機構範圍會被韌體拒絕。\n指令：h 高度",
     "sv": "伺服實際輸出角度（不含 offset 運算）。調整會切換為「直接角度」模式、暫停自動平衡（按 R 恢復）。滾輪或按住 +/- 可連續調整。\n指令：d a1 a2 a3",
     "step": "每次調整伺服角度的步進（0.5° / 1° / 2°），按一下切換。",
-    "pid_step": "PID 增益的步進倍率（×0.1 / ×1 / ×5），基準為 Kp 0.01、Ki 0.002、Kd 0.01，按一下切換。",
-    "target_step": "目標點與平台高度每次調整的步進（0.5 / 1 / 2 / 5 mm），按一下切換。",
+    "pid_step": "Kp / Ki / Kd 每次調整的步進（0.001 / 0.01 / 0.1），按一下切換。",
+    "target_step": "目標點與平台高度每次調整的步進（0.1 / 0.5 / 1 / 2 / 5 mm），按一下切換。",
     "origin": "把目前三顆伺服的角度寫入為平台水平的原點（存進 ESP32，斷電保留）。請先把平台調到實際水平；需在「直接角度」模式且 PCA9685 有連線。為避免誤按，3 秒內要再按一次確認。\n指令：o",
     "origin_reset": "還原為 Config.h 的預設原點，並清除 ESP32 已儲存的值。\n指令：o r",
     "cmd": "直接輸入韌體指令，Enter 送出。例：s 顯示狀態、? 說明、c 1 90 1 0 校正伺服。快捷鍵 /",
@@ -1038,7 +1038,7 @@ class App:
         self.cmd_text, self.cmd_focus = "", False
         self.ov = {}
         self.servo_step = 0.5
-        self.pid_scale = 1.0
+        self.pid_step = 0.01
         self.target_step = 1.0
         self.origin_armed_until = 0.0
         self.s = 1.0
@@ -1445,10 +1445,10 @@ class App:
 
         h2 = 34 * s + 3 * (rh + gap) + 28 * s
         yy = self.card(bx, y, iw, h2, "PID 增益")
-        for key, label, step in (
-            ("kp", "Kp  度/mm", 0.01),
-            ("ki", "Ki  度/(mm·s)", 0.002),
-            ("kd", "Kd  度/(mm/s)", 0.01),
+        for key, label in (
+            ("kp", "Kp  度/mm"),
+            ("ki", "Ki  度/(mm·s)"),
+            ("kd", "Kd  度/(mm/s)"),
         ):
             v = self.val(key, stat)
             dl = ui.stepper(
@@ -1461,18 +1461,18 @@ class App:
                 enabled=ok,
             )
             if dl and ok:
-                new = round(max(0.0, v + dl * step * self.pid_scale), 4)
+                new = round(max(0.0, v + dl * self.pid_step), 4)
                 self.send_pid(stat, **{key: new})
             yy += rh + gap
         if ui.button(
             "pid_step",
             (ix, yy, half, 24 * s),
-            f"步進 ×{self.pid_scale:g}",
+            f"步進 {self.pid_step:g}",
             12.5 * s,
             HINTS["pid_step"],
         ):
-            scales = (0.1, 1.0, 5.0)
-            self.pid_scale = scales[(scales.index(self.pid_scale) + 1) % len(scales)]
+            steps = (0.001, 0.01, 0.1)
+            self.pid_step = steps[(steps.index(self.pid_step) + 1) % len(steps)]
         y += h2 + 10 * s
 
         h3 = 34 * s + 3 * (rh + gap) + 28 * s
@@ -1536,7 +1536,7 @@ class App:
             12.5 * s,
             HINTS["target_step"],
         ):
-            steps = (0.5, 1.0, 2.0, 5.0)
+            steps = (0.1, 0.5, 1.0, 2.0, 5.0)
             self.target_step = steps[(steps.index(self.target_step) + 1) % len(steps)]
         y += h3 + 10 * s
 
