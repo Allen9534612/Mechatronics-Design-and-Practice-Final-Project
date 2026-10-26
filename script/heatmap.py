@@ -68,10 +68,13 @@ STAT_FIELDS = [
     "zones",
     "int_x",
     "int_y",
+    "out_alpha",
+    "d_alpha",
+    "int_limit",
 ]
 MODE_NAMES = ["PID 自動平衡", "指定傾角", "直接角度"]
 
-DESIGN_W, DESIGN_H = 1280, 760
+DESIGN_W, DESIGN_H = 1500, 760
 
 # --------------------------------------------------------------------------
 # 顯卡與 DPI
@@ -366,6 +369,7 @@ class DemoLink:
         self.n = 4
         self.mode = 1  # 與韌體一致：開機是水平，不自動平衡。
         self.kp, self.ki, self.kd = 0.12, 0.01, 0.06
+        self.out_alpha, self.d_alpha, self.int_limit = 0.65, 0.5, 3.0
         self.tx = self.ty = 0.0
         self.height = 82.6
         self.max_tilt = 15.0
@@ -412,6 +416,15 @@ class DemoLink:
                     self.tel.add_log(
                         f">> PID kp={self.kp:.4f} ki={self.ki:.4f} kd={self.kd:.4f}"
                     )
+                elif c == "f" and len(p) == 4:
+                    a, b, lim = map(float, p[1:])
+                    if 0 < a <= 1 and 0 < b <= 1 and lim >= 0:
+                        self.out_alpha, self.d_alpha, self.int_limit = a, b, lim
+                        self.tel.add_log(
+                            f">> 輸出 α={a:.2f}  D α={b:.2f}  積分上限={lim:.2f} 度"
+                        )
+                    else:
+                        self.tel.add_log(">> 錯誤：α 需在 (0, 1]，積分上限需 >= 0")
                 elif c == "g" and len(p) == 3:
                     self.tx, self.ty = float(p[1]), float(p[2])
                     self.tel.add_log(f">> 目標點 ({self.tx:.1f}, {self.ty:.1f}) mm")
@@ -540,6 +553,9 @@ class DemoLink:
                                 int((d > 0).sum()),
                                 self.ix,
                                 self.iy,
+                                self.out_alpha,
+                                self.d_alpha,
+                                self.int_limit,
                             ],
                         )
                     )
@@ -996,6 +1012,10 @@ HINTS = {
     "kp": "比例增益 Kp（度/mm）：球偏離越遠，平台傾越多。太大會震盪，太小反應慢。滾輪或按住 +/- 可連續調整。\n指令：p kp ki kd",
     "ki": "積分增益 Ki（度/(mm·s)）：消除穩態誤差，太大會越晃越大。調整時會清除積分。\n指令：p kp ki kd",
     "kd": "微分增益 Kd（度/(mm/s)）：依球速度提供阻尼以抑制震盪，雜訊大時不宜太大。\n指令：p kp ki kd",
+    "out_alpha": "輸出低通 α（0~1）：1 = 不濾波，越小輸出越平滑但反應越慢。\n指令：f 輸出α D的α 積分上限",
+    "d_alpha": "微分項低通 α（0~1）：1 = 不濾波，越小越能抑制微分雜訊但延遲越大。\n指令：f 輸出α D的α 積分上限",
+    "int_limit": "積分項貢獻的傾角上限（度）：防止積分過大造成越晃越大，0 = 關閉積分。\n指令：f 輸出α D的α 積分上限",
+    "filt_step": "濾波與積分上限每次調整的步進（0.01 / 0.05 / 0.1 / 0.5），按一下切換。",
     "tx": "目標點 X（mm，盤面中心為原點）：球要停的位置。\n指令：g x y",
     "ty": "目標點 Y（mm，盤面中心為原點）：球要停的位置。\n指令：g x y",
     "center": "把目標點設回盤面中心 (0, 0)。\n指令：g 0 0",
@@ -1039,6 +1059,7 @@ class App:
         self.ov = {}
         self.servo_step = 0.5
         self.pid_step = 0.01
+        self.filt_step = 0.05
         self.target_step = 1.0
         self.origin_armed_until = 0.0
         self.s = 1.0
@@ -1060,6 +1081,16 @@ class App:
         for k, x in v.items():
             self.set_ov(k, x)
         self.link.send(f"p {v['kp']:.4f} {v['ki']:.4f} {v['kd']:.4f}")
+
+    def send_filter(self, stat, **chg):
+        keys = ("out_alpha", "d_alpha", "int_limit")
+        v = {k: self.val(k, stat) for k in keys}
+        v.update(chg)
+        for k, x in v.items():
+            self.set_ov(k, x)
+        self.link.send(
+            f"f {v['out_alpha']:.3f} {v['d_alpha']:.3f} {v['int_limit']:.3f}"
+        )
 
     def send_target(self, tx, ty):
         self.set_ov("tx", tx)
@@ -1393,7 +1424,9 @@ class App:
         stat = d["stat"]
         ok = stat is not None
         pad = 14 * s
-        bx, iw = x + pad, w - 2 * pad
+        iw = (w - 3 * pad) / 2
+        bx = x + pad
+        col2 = x + 2 * pad + iw
         ix, iiw = bx + 14 * s, iw - 28 * s
         rh = 24 * s
         gap = 6 * s
@@ -1474,6 +1507,41 @@ class App:
             steps = (0.001, 0.01, 0.1)
             self.pid_step = steps[(steps.index(self.pid_step) + 1) % len(steps)]
         y += h2 + 10 * s
+
+        h2b = 34 * s + 3 * (rh + gap) + 28 * s
+        yy = self.card(bx, y, iw, h2b, "濾波與積分")
+        for key, label, lo, hi in (
+            ("out_alpha", "輸出 α", 0.01, 1.0),
+            ("d_alpha", "D α", 0.01, 1.0),
+            ("int_limit", "積分上限 (度)", 0.0, 30.0),
+        ):
+            v = self.val(key, stat)
+            dl = ui.stepper(
+                "flt" + key,
+                (ix, yy, iiw, rh),
+                label,
+                f"{v:.2f}" if ok else "—",
+                12.5 * s,
+                HINTS[key],
+                enabled=ok,
+            )
+            if dl and ok:
+                new = round(min(max(v + dl * self.filt_step, lo), hi), 3)
+                self.send_filter(stat, **{key: new})
+            yy += rh + gap
+        if ui.button(
+            "filt_step",
+            (ix, yy, half, 24 * s),
+            f"步進 {self.filt_step:g}",
+            12.5 * s,
+            HINTS["filt_step"],
+        ):
+            steps = (0.01, 0.05, 0.1, 0.5)
+            self.filt_step = steps[(steps.index(self.filt_step) + 1) % len(steps)]
+
+        # 第二欄
+        bx, ix = col2, col2 + 14 * s
+        y = 54 * s
 
         h3 = 34 * s + 3 * (rh + gap) + 28 * s
         yy = self.card(bx, y, iw, h3, "目標點與高度")
@@ -1650,9 +1718,9 @@ class App:
         r.begin(w, h)
         ui.hint = None
         d = self.tel.snapshot()
-        lw, rw = 318 * s, 330 * s
+        lw, rw = 290 * s, 650 * s
         if w < lw + rw + 220:
-            lw, rw = max((w - 220) * 0.49, 200), max((w - 220) * 0.51, 200)
+            lw, rw = max((w - 220) * 0.3, 150), max((w - 220) * 0.7, 300)
         self.left_panel(d, 0, lw)
         self.center(d, lw + 8 * s, w - rw - 8 * s, h)
         self.right_panel(d, w - rw, rw, h)

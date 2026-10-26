@@ -152,6 +152,9 @@ void printHelp() {
         "  c 腳 neutral [gain] [offset]   設定伺服校正，例：c 2 92 1 0");
     Serial.println(
         "  p kp ki kd   設定 PID（kp:度/mm ki:度/(mm·s) kd:度/(mm/s)）");
+    Serial.println(
+        "  f 輸出α D的α 積分上限   設定 PID 濾波與積分上限（α "
+        "0~1，上限單位度）");
     Serial.println("  h 高度        設定平台高度");
     Serial.println("  4 / 8        切換感測器解析度");
     Serial.println("  s            顯示目前狀態");
@@ -183,16 +186,16 @@ void printStatus() {
 
 // 輸出一行狀態，欄位順序需與 script/heatmap.py 的 STAT_FIELDS 一致：
 // STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,
-//      maxTilt,distMm,validZones,integX,integY
+//      maxTilt,distMm,validZones,integX,integY,outAlpha,dAlpha,integLimit
 // mode 為 Mode 的數值，x、y 為平台座標（mm）。
 void printStat(bool present, float px, float py) {
     Serial.printf(
         "STAT,%d,%d,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.4f,%.4f,%.4f,%.1f,"
-        "%.1f,%.1f,%.1f,%.1f,%d,%.2f,%.2f\n",
+        "%.1f,%.1f,%.1f,%.1f,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n",
         (int)mode, present ? 1 : 0, px, py, tiltTheta, tiltPhi, lastServo[0],
         lastServo[1], lastServo[2], pid.kp, pid.ki, pid.kd, targetX, targetY,
         height, maxTilt, lastDistMm, lastValidZones, pid.integralX(),
-        pid.integralY());
+        pid.integralY(), pid.outputAlpha, pid.dAlpha, pid.integralLimit);
 }
 
 // 以空白或逗號切字，回傳字詞數。
@@ -465,6 +468,22 @@ void handleCommand(char* line) {
                               pid.ki, pid.kd);
             } else
                 Serial.println(">> 格式：p kp ki kd");
+            break;
+
+        case 'f':  // 輸出低通、微分低通與積分貢獻上限；不清除積分。
+            if (parseNumbers(tok, n, 1, 3, v)) {
+                if (v[0] <= 0 || v[0] > 1 || v[1] <= 0 || v[1] > 1 ||
+                    v[2] < 0) {
+                    Serial.println(">> 錯誤：α 需在 (0, 1]，積分上限需 >= 0");
+                    break;
+                }
+                pid.outputAlpha = v[0];
+                pid.dAlpha = v[1];
+                pid.integralLimit = v[2];
+                Serial.printf(">> 輸出 α=%.2f  D α=%.2f  積分上限=%.2f 度\n",
+                              pid.outputAlpha, pid.dAlpha, pid.integralLimit);
+            } else
+                Serial.println(">> 格式：f 輸出α D的α 積分上限");
             break;
 
         case 'h':

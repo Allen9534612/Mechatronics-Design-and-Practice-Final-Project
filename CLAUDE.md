@@ -49,8 +49,9 @@ There is no test suite or linter configured in this repo.
   6. `lib/ServoMotor`：透過 PCA9685（接在 `Wire1`，與感測器分開的匯流排）輸出 PWM，`setAngle(channel, angle)`。
   `main.cpp` 的 `modelToServo()` 依 `servoCal`（neutral/gain/offset/限幅）把模型角轉成伺服角。`maxTilt = min(運動學可達最大傾角, MAX_TILT_DEG)`。
 - 序列埠：`DATA,<N>,<N*N 個距離>,<gridX>,<gridY>` 供 `script/heatmap.py` 使用，**gridX/gridY 維持格點座標、無球為 -1**；指令列表輸入 `?` 查看。
-- 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。韌體不再週期性輸出人類可讀狀態列，指令回覆（`>>` 開頭）與 `s` 指令仍保留。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
-- `script/heatmap.py`：moderngl（OpenGL 3.3）+ pygame 的監控 GUI，視窗可任意縮放（版面等比例縮放），配色為中性灰階加單一強調色。左側為資料流數值（感測器 → 位置估測 → PID → 伺服），中間為距離熱圖（色階依畫面內距離範圍自動調整）、球位置、傾斜方向與韌體訊息，右側為可調項（解析度、自動/回水平、PID、目標點、高度、伺服角度與原點、指令輸入框）與懸停提示。pyserial 背景執行緒收發並自動重連，顯示值一律以 STAT 為準。程式以 DPI-aware 啟動（避免 Windows 縮放造成模糊），啟動時偵測顯卡並在左下角顯示實際渲染的 GPU；用到內顯而系統有獨顯時會警示，`--gpu high` 可寫入 Windows 圖形偏好（`HKCU\Software\Microsoft\DirectX\UserGpuPreferences`）並重新啟動。GUI 內的 `SERVO_MIN_DEG/MAX_DEG` 需與 Config.h 一致。
+- 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY,outAlpha,dAlpha,integLimit`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。韌體不再週期性輸出人類可讀狀態列，指令回覆（`>>` 開頭）與 `s` 指令仍保留。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
+- `script/heatmap.py`：moderngl（OpenGL 3.3）+ pygame 的監控 GUI，視窗可任意縮放（版面等比例縮放），配色為中性灰階加單一強調色。左側為資料流數值（感測器 → 位置估測 → PID → 伺服），中間為距離熱圖（色階依畫面內距離範圍自動調整）、球位置、傾斜方向與韌體訊息，右側分兩欄，為可調項（第一欄：解析度、自動/回水平、PID、濾波與積分；第二欄：目標點、高度、伺服角度與原點、指令輸入框、提示）與懸停提示。pyserial 背景執行緒收發並自動重連，顯示值一律以 STAT 為準。程式以 DPI-aware 啟動（避免 Windows 縮放造成模糊），啟動時偵測顯卡並在左下角顯示實際渲染的 GPU；用到內顯而系統有獨顯時會警示，`--gpu high` 可寫入 Windows 圖形偏好（`HKCU\Software\Microsoft\DirectX\UserGpuPreferences`）並重新啟動。GUI 內的 `SERVO_MIN_DEG/MAX_DEG` 需與 Config.h 一致。
+- PID 濾波：`f 輸出α D的α 積分上限` 設定 `outputAlpha`/`dAlpha`/`integralLimit`（α 需在 (0,1]、上限 >= 0，不清除積分，不存 NVS，重開機回到 `Config.h` 預設）。
 - 伺服原點校正：`d a1 a2 a3` 直接設定三顆伺服的實際角度（不加 offset，限制在各自的 `minDeg~maxDeg`，進入「直接角度」模式、自動平衡暫停）；`o` 把目前的 `d` 角度寫入為水平原點（`offset = 角度 − neutral`，存進 ESP32 的 NVS 並在開機時載入，斷電保留；只在直接角度模式且 PCA9685 有連線時允許）；`o r` 還原成 `Config.h` 的 `SERVO_CAL_DEFAULT` 並清除儲存值。`l`（回水平）與自動平衡都以 `neutral + offset` 為水平角度。GUI 的「伺服角度與原點」卡片對應這三個指令（寫入原點要在 3 秒內按兩次確認）。
 - `test/raw.cpp`：獨立的感測器原始資料測試程式（不屬於主 build）。
 
@@ -101,3 +102,4 @@ There is no test suite or linter configured in this repo.
   - 已知/待辦：球在板子正中央時估測不在視野中心（8x8 約 (3.34, 4.23)、4x4 約 (1.45, 2.00)；感測器軸心與板中心有偏移），需用目標點 `g x y` 校正；球偏離中心時的方向/比例尚未實機驗證（球在板上不要傾斜）；mm 換算用的距離有 range-walk 偏差，比例只是近似；感測器位置變動後要重驗門檻。開發板目前可能仍是診斷韌體，請自行上傳正式版。
 - 2026-10-23：`Config.h` 的 `SENSOR_FLIP_X` 改為 true（X 軸方向反了）。GUI 熱圖是感測器座標、`phi` 是平台座標，所以箭頭改為反向套用旋轉/翻轉後再畫；`heatmap.py` 新增 `SENSOR_ROTATION_DEG/FLIP_X/FLIP_Y` 常數，**需與 Config.h 一致**。尚未實機確認 X 方向。
 - 2026-10-23：GUI 的「PID 增益」與「目標點與高度」卡片新增步進按鈕（與伺服卡片一致，按一下循環切換）：PID 的 Kp/Ki/Kd 共用步進 0.001/0.01/0.1（預設 0.01），目標點與高度為 0.1/0.5/1/2/5 mm（預設 1，行為不變）。只用 `--demo --snapshot` 檢查版面，未做點擊測試。
+- 2026-10-26：GUI 新增「濾波與積分」卡片，可調輸出 α、D α、積分上限（步進 0.01/0.05/0.1/0.5）。韌體新增 `f` 指令，STAT 尾端新增 `outAlpha,dAlpha,integLimit` 三欄（`STAT_FIELDS` 已同步）。右側欄改為兩欄、左欄縮窄（設計尺寸 1500x760）。驗證：`pio run -e esp32` 通過、host mock 測試通過、GUI 互動測試 38 項通過（含新卡片）；`f` 指令尚未用實體裝置驗證。
