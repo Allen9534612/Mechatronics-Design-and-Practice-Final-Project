@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 每次開發前，請先閱讀本檔案（CLAUDE.md）以掌握專案現況。
 - 任何開發歷程（完成的工作、重大決策、已知問題等）都要記錄在本檔案的「開發歷程」章節中，保持更新。
 - 排版：C/C++ 用 `clang-format -i -style=file`（src/lib/include），Python 用 `ruff format script/` 與 `ruff check --fix script/`（指令見 README）；改完程式後先排版再 commit。
+- commit message 使用英文且盡量簡要。
 
 ## Project overview
 
