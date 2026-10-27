@@ -2,3 +2,5 @@ pygame>=2.5
 pyserial>=3.5
 moderngl>=5.8
 numpy>=1.24
+clang-format
+ruff

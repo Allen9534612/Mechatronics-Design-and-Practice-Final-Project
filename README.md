@@ -14,8 +14,10 @@
 
 - Python 3.13
 - Python Package:
-    - pyserial
     - pygame
+    - pyserial
+    - moderngl
+    - numpy
     - clang-format
     - ruff
     
