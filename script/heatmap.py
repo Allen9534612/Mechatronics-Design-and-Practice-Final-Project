@@ -277,10 +277,29 @@ def parse_line(tel, line):
 
 
 def find_port():
-    keywords = ["CP210", "CH340", "UART", "SILICON LABS", "USB-SERIAL"]
+    """自動偵測開發板序列埠。
+
+    用描述字串比對（Windows 上常見），但 Linux 下 pyserial 對同一顆 USB-UART
+    晶片回報的描述可能只是泛用的 "USB Serial"，比對不到關鍵字，所以再用
+    VID:PID 比對常見晶片（CH340/CP210x/FTDI）；兩者都比對不到時，優先選
+    ttyUSB*/ttyACM*（真實外接裝置），避免 fallback 選到 Linux 內建的
+    ttyS0~ttyS31 等虛擬序列埠。
+    """
+    keywords = ["CP210", "CH340", "UART", "SILICON LABS", "USB-SERIAL", "USB SERIAL"]
+    known_vid_pid = {
+        (0x1A86, 0x7523),  # CH340
+        (0x10C4, 0xEA60),  # CP2102/CP2104 (Silicon Labs)
+        (0x0403, 0x6001),  # FTDI FT232
+    }
     ports = list(serial.tools.list_ports.comports())
     for p in ports:
-        if any(k in p.description.upper() for k in keywords):
+        if any(k in (p.description or "").upper() for k in keywords):
+            return p.device
+    for p in ports:
+        if (p.vid, p.pid) in known_vid_pid:
+            return p.device
+    for p in ports:
+        if "ttyUSB" in p.device or "ttyACM" in p.device:
             return p.device
     return ports[0].device if ports else None
 
