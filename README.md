@@ -33,7 +33,8 @@
 
 2. 安裝 Python 函式庫：
    ```bash
-   pip install pygame pyserial clang-format ruff
+   pip install -r script/requirements.txt
+   ```
 
 3. 安裝 VS Code 插件：
     - [PlatformIO](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide)
