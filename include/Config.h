@@ -110,7 +110,7 @@ static constexpr float BALANCE_TARGET_X = 0.0f;
 static constexpr float BALANCE_TARGET_Y = 0.0f;
 static constexpr float PID_KP = 0.12f;
 static constexpr float PID_KI = 0.00f;
-static constexpr float PID_KD = 0.00f;
+static constexpr float PID_KD = 0.04f;
 static constexpr float PID_OUTPUT_ALPHA = 0.85f;       // 輸出低通，1 = 不濾波。
 static constexpr float PID_D_ALPHA = 0.7f;             // 微分項低通。
 static constexpr float PID_INTEGRAL_LIMIT_DEG = 2.0f;  // 積分項貢獻上限。
