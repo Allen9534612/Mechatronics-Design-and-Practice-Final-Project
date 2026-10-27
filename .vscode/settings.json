@@ -12,7 +12,7 @@
         "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
     },
     "clangd.arguments": [
-        "--query-driver=C:/Users/ricky/.platformio/packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-*",
+        "--query-driver=${userHome}/.platformio/packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-*",
         "--compile-commands-dir=${workspaceFolder}",
         "--header-insertion=never",
         "--background-index"
