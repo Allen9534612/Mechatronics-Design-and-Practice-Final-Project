@@ -37,11 +37,27 @@ This is a PlatformIO project (`platformio.ini` at the repo root). Use the Platfo
 - Clean build artifacts: `pio run -t clean`
 - 監控 GUI（OpenGL，可縮放）：`pip install -r script/requirements.txt` 後執行 `python script/heatmap.py`（自動偵測序列埠）、`--port COM5` 指定埠、`--demo` 用模擬資料（不接硬體）、`--snapshot out.png` 存一張畫面後離開（除錯用）。
 
-There is no test suite or linter configured in this repo.
+排版與靜態檢查（Python 只有 `script/`，韌體在 `src/`、`lib/`）：
+- 格式：`ruff format script/`、`ruff check --fix script/`（設定在 `ruff.toml`）
+- 型別：`mypy`（設定在 `mypy.ini`，`files = script`）。pyserial 沒有附型別資訊，
+  已用 `[mypy-serial.*] ignore_missing_imports` 放寬；想真正檢查 serial 的用法就
+  裝 `types-pyserial` 並移除那段。**刪掉 `mypy.ini` 不會停用 mypy**——編輯器的
+  擴充套件仍會以預設值執行，要停用請關閉 VS Code 的
+  `ms-python.mypy-type-checker`，或在 `.vscode/settings.json` 加
+  `"mypy-type-checker.ignorePatterns": ["**/*.py"]`。
+
+本 repo 沒有測試套件（host 端的驗證腳本都放在暫存目錄，未納入 repo）。
 
 ## Architecture
 
 - `platformio.ini`：`esp32`（預設，`nodemcu-32s`）依賴 ESP32Servo、Adafruit PWM Servo Driver、stm32duino/VL53L7CX；`mega`/`uno` 僅保留設定，現有程式碼只能在 esp32 編譯。`[env] build_flags = -Iinclude` 讓 `lib/*` 也能 `#include "Config.h"`。
+- **平台高度的三層上限**（排查「為什麼調不上去」時先看這裡，以目前尺寸計算）：
+  `96.9`（舊的 40~140 伺服安全角度上限，放寬到 20~160 後已非瓶頸）→
+  `101.67`（`computeMaxTilt()` 歸零：可達傾角不足 `KINEMATICS_TILT_MARGIN_DEG`
+  的餘裕時回傳 0，`h` 指令會報「這個高度無法保持水平」）→
+  `102.33`（機構硬極限 `maxHeight()`＝連桿與擺臂完全伸直成一直線，
+  `sqrt((l1+l2)^2 - (lp-lb)^2)`，再高運動學無解）。下限則由伺服安全角度決定，
+  20~160 對應約 20.1 mm。
 - 容許值一律放 `Config.h`：伺服角度分成 `SERVO_RANGE_MIN/MAX_DEG`（機構工作範
   圍，運動學輸出與 `d` 指令用，`SERVO_CAL_DEFAULT` 的 minDeg/maxDeg 由它填）與
   `SERVO_HARD_MIN/MAX_DEG`（伺服物理極限，校正用的 `a` 指令與
@@ -302,3 +318,21 @@ There is no test suite or linter configured in this repo.
     項（預設關閉時模型角/computeMaxTilt 完全不變、負根＝對 90 度鏡射、負根在
     40~交界之間嚴格遞增、跨交界整體單調且無跳變、伺服角全在安全範圍、對照組
     確認不切負根會反轉）；既有 108 + 53 + 32 + 22 項無回歸。
+- 2026-11-11（工具）：設定 mypy。mypy 2.4.0 裝在使用者的 `~/.local/bin`（不在
+  `script/requirements.txt`），編輯器的擴充套件一直以預設值在這個 repo 執行
+  （`.mypy_cache/` 為證），但 repo 內沒有任何設定檔。實際只有 3 條錯誤，全是
+  pyserial 缺型別 stub，程式本身乾淨。新增 `mypy.ini`（`files = script`、
+  `[mypy-serial.*] ignore_missing_imports`），並把漏掉的 `.mypy_cache` 加進
+  `.gitignore`（`.ruff_cache` 本來就有）。驗證：從 repo 根、`script/`、指定檔案
+  路徑三種 cwd 執行皆為 `Success: no issues found`；`ruff` 不受影響。
+- 2026-11-11（高度上下限的成因）：釐清「為什麼高度調不上去/調不下去」。
+  - **上限有三層**（見上方 Architecture）。使用者回報「大於 100 會說無法平衡」
+    即第二層：`computeMaxTilt()` 在 101.67 mm 歸零，`h` 指令的
+    `if (newMax <= 0)` 就印「這個高度無法保持水平」。真正的機構極限是
+    102.33 mm（連桿 62 + 擺臂 45 = 107 完全伸直，水平跨距固定 31.25）。
+  - **下限由伺服安全角度決定**。把 `SERVO_SAFE_*`/`SERVO_RANGE_*` 從 40~140
+    放寬到 20~160 後，可用高度變成 20.1 ~ 102.2 mm；`h 20` 只差 0.1 mm 會被夾限
+    （模型角 154.99 度對應伺服 19.9 度，低於安全下限 20）。放寬前的下限是
+    30.3 mm。
+  - `PLATFORM_MIN/MAX_HEIGHT_MM` 目前為 20 / 100，`Config.h` 的註解已改成記錄這
+    三層的實際數字（原註解還停在 50 / 96.9 的舊值）。
