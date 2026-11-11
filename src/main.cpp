@@ -12,10 +12,14 @@
 #include "PlatformKinematics.h"
 #include "ServoMotor.h"
 
+// 新增模式只能附加在最後面：script/heatmap.py 的 MODE_NAMES 是位置對應，且
+// 硬寫死 mode==0（自動平衡按鈕）與 mode==2（寫入原點的保護）。
 enum Mode {
-    MODE_BALL,  // PID 自動平衡
-    MODE_TILT,  // 指定傾角
-    MODE_RAW    // 直接指定伺服角度
+    MODE_BALL,   // PID 自動平衡
+    MODE_TILT,   // 指定傾角
+    MODE_RAW,    // 直接指定伺服角度
+    MODE_SWEEP,  // 開迴路圓錐掃掠（不讀球位置）
+    MODE_HOP     // 開迴路高度振盪（不讀球位置）
 };
 
 // 球位置，座標單位為 mm。
@@ -45,6 +49,13 @@ float targetY = BALANCE_TARGET_Y;
 float tiltTheta = 0.0f;
 float tiltPhi = 0.0f;
 
+// 開迴路掃掠/振盪（w、v 指令）的參數與起始時刻。
+float sweepTheta = SWEEP_TILT_DEG;
+float sweepPeriodS = SWEEP_PERIOD_S;
+float hopAmplitude = HOP_AMPLITUDE_MM;
+float hopPeriodS = HOP_PERIOD_S;
+uint32_t sweepStartMs = 0;
+
 BallReading manualBall = {false, 0.0f, 0.0f};
 BallReading irBall = {false, 0.0f, 0.0f};
 bool servoReady = false;  // PCA9685 是否偵測到。
@@ -67,10 +78,57 @@ void sensorToPlatform(float sx, float sy, float& px, float& py) {
     py = sx * sin(r) + sy * cos(r);
 }
 
+// 未夾限的伺服角度。
+float rawServoAngle(int leg, float modelDeg) {
+    const ServoCal& c = servoCal[leg];
+    return c.neutral + c.gain * (modelDeg - levelModel[leg]) + c.offset;
+}
+
 float modelToServo(int leg, float modelDeg) {
     const ServoCal& c = servoCal[leg];
-    float a = c.neutral + c.gain * (modelDeg - levelModel[leg]) + c.offset;
-    return constrain(a, c.minDeg, c.maxDeg);
+    return constrain(rawServoAngle(leg, modelDeg), c.minDeg, c.maxDeg);
+}
+
+// 這個姿態的三顆伺服是否都落在 [minDeg, maxDeg] 內。運動學可達的範圍比伺服
+// 角度允許的範圍大（例如預設高度下 IK 可到 16.3 度，但伺服只到 12 度），超出
+// 時 modelToServo() 會夾限、實際姿態與指令不符。開迴路模式會連續停在極限附近，
+// 所以下指令時先檢查整段軌跡。
+bool poseWithinServoRange(float thetaDeg, float phiDeg, float h) {
+    float model[3];
+    if (!kinematics.solveSpherical(thetaDeg, phiDeg, h, model)) return false;
+    for (int i = 0; i < 3; i++) {
+        float a = rawServoAngle(i, model[i]);
+        if (a < servoCal[i].minDeg || a > servoCal[i].maxDeg) return false;
+    }
+    return true;
+}
+
+// 目前高度下，全方向都不會夾限的最大傾角（0 表示連最小傾角都不行）。
+float usableSweepTilt() {
+    float usable = 0.0f;
+    for (float th = 0.5f; th <= maxTilt; th += 0.5f) {
+        bool all = true;
+        for (float phi = 0.0f; phi < 360.0f; phi += 5.0f)
+            if (!poseWithinServoRange(th, phi, height)) {
+                all = false;
+                break;
+            }
+        if (!all) break;
+        usable = th;
+    }
+    return usable;
+}
+
+// 以目前高度為基準，上下都不會夾限的最大振幅。
+float usableHopAmplitude() {
+    float usable = 0.0f;
+    for (float a = 0.5f; a <= 40.0f; a += 0.5f) {
+        if (!poseWithinServoRange(0.0f, 0.0f, height - a) ||
+            !poseWithinServoRange(0.0f, 0.0f, height + a))
+            break;
+        usable = a;
+    }
+    return usable;
 }
 
 void writeServos(const float servoDeg[3]) {
@@ -80,16 +138,22 @@ void writeServos(const float servoDeg[3]) {
     }
 }
 
-// 平台往 phiDeg 方向那一側下傾 thetaDeg 度。無解時維持原姿態並回傳 false。
-bool applyTilt(float thetaDeg, float phiDeg) {
+// 平台往 phiDeg 方向那一側下傾 thetaDeg 度，h 為平台中心高度（預設為目前設定
+// 的 height）。無解時維持原姿態並回傳 false。
+bool applyTilt(float thetaDeg, float phiDeg, float h = height) {
     float model[3];
-    if (!kinematics.solveSpherical(thetaDeg, phiDeg, height, model))
-        return false;
+    if (!kinematics.solveSpherical(thetaDeg, phiDeg, h, model)) return false;
 
     float servo[3];
     for (int i = 0; i < 3; i++) servo[i] = modelToServo(i, model[i]);
 
     writeServos(servo);
+
+    // ToF 的距離篩選窗要跟著平台實際高度走（見 IRSensorArray::setHeight()）。
+    // MODE_HOP 的高度每個控制週期都在變，而 h 指令只在設定時呼叫一次，所以放在
+    // 這裡——它是所有會改變平台高度的路徑唯一都會經過的地方，離開振盪模式時
+    // （l / t / PID）也會自動還原成基準高度。
+    if (USE_IR_SENSOR) irSensor.setHeight(h);
     return true;
 }
 
@@ -128,6 +192,22 @@ void clearServoOrigin() {
     prefs.end();
 }
 
+const char* modeName() {
+    switch (mode) {
+        case MODE_BALL:
+            return "PID 自動";
+        case MODE_TILT:
+            return "指定傾角";
+        case MODE_RAW:
+            return "直接角度";
+        case MODE_SWEEP:
+            return "圓錐掃掠";
+        case MODE_HOP:
+            return "高度振盪";
+    }
+    return "?";
+}
+
 void printHelp() {
     Serial.println();
     Serial.println("========== 指令（單位：mm、度）==========");
@@ -140,6 +220,12 @@ void printHelp() {
     Serial.println("  g x y        設定目標點（mm，盤面中心為原點）");
     Serial.println("  t 傾角 方向   直接傾斜：往「方向」那側往下傾，例：t 5 0");
     Serial.println("  l            回水平");
+    Serial.println(
+        "  w 傾角 週期   開迴路圓錐掃掠（不讀球位置），傾斜方向繞一圈，例：w 5 "
+        "2");
+    Serial.println(
+        "  v 振幅 週期   開迴路高度振盪（不讀球位置），平台上下動，例：v 5 "
+        "0.5");
     Serial.println(
         "  a a1 a2 a3   設定三顆伺服角度（會加上各自 offset，a 90 90 90 = "
         "水平）");
@@ -164,9 +250,13 @@ void printHelp() {
 
 void printStatus() {
     Serial.println();
-    Serial.printf("模式: %s\n", mode == MODE_BALL   ? "PID 自動"
-                                : mode == MODE_TILT ? "指定傾角"
-                                                    : "直接角度");
+    Serial.printf("模式: %s\n", modeName());
+    if (mode == MODE_SWEEP)
+        Serial.printf("掃掠: 傾角 %.1f 度，週期 %.2f 秒\n", sweepTheta,
+                      sweepPeriodS);
+    if (mode == MODE_HOP)
+        Serial.printf("振盪: %.1f ± %.1f mm，週期 %.2f 秒\n", height,
+                      hopAmplitude, hopPeriodS);
     Serial.printf("伺服驅動: %s\n", servoReady ? "已連線" : "未偵測到");
     Serial.printf("高度: %.1f mm  最大傾角: %.1f 度\n", height, maxTilt);
     Serial.printf("PID: kp=%.4f ki=%.4f kd=%.4f\n", pid.kp, pid.ki, pid.kd);
@@ -361,6 +451,76 @@ void handleCommand(char* line) {
                           lastServo[1], lastServo[2]);
             break;
 
+        case 'w':  // 開迴路圓錐掃掠：驗證運動學、伺服方向與座標系符號。
+            if (parseNumbers(tok, n, 1, 2, v)) {
+                if (v[0] < 0 || v[0] > maxTilt) {
+                    Serial.printf(">> 錯誤：傾角需在 0 ~ %.1f 度之間\n",
+                                  maxTilt);
+                    break;
+                }
+                if (v[1] < SWEEP_MIN_PERIOD_S) {
+                    Serial.printf(">> 錯誤：週期需 >= %.2f 秒（伺服跟不上）\n",
+                                  SWEEP_MIN_PERIOD_S);
+                    break;
+                }
+                bool reachable = true;
+                for (float phi = 0.0f; phi < 360.0f; phi += 1.0f)
+                    if (!poseWithinServoRange(v[0], phi, height)) {
+                        reachable = false;
+                        break;
+                    }
+                if (!reachable) {
+                    Serial.printf(
+                        ">> 錯誤：傾角 %.1f 度有部分方向超出伺服角度範圍（高度 "
+                        "%.1f mm 下約 %.1f 度以內可用）\n",
+                        v[0], height, usableSweepTilt());
+                    break;
+                }
+                mode = MODE_SWEEP;
+                manualBall.present = false;
+                sweepTheta = v[0];
+                sweepPeriodS = v[1];
+                sweepStartMs = millis();
+                Serial.printf(
+                    ">> 圓錐掃掠：傾角 %.1f 度，每 %.2f 秒繞一圈（l 回水平）\n",
+                    sweepTheta, sweepPeriodS);
+            } else
+                Serial.println(">> 格式：w 傾角 週期（秒）");
+            break;
+
+        case 'v':  // 開迴路高度振盪：驗證伺服是否快得足以把球彈起來。
+            if (parseNumbers(tok, n, 1, 2, v)) {
+                if (v[0] <= 0) {
+                    Serial.println(">> 錯誤：振幅需大於 0");
+                    break;
+                }
+                if (v[1] < HOP_MIN_PERIOD_S) {
+                    Serial.printf(">> 錯誤：週期需 >= %.2f 秒（伺服跟不上）\n",
+                                  HOP_MIN_PERIOD_S);
+                    break;
+                }
+                if (!poseWithinServoRange(0.0f, 0.0f, height - v[0]) ||
+                    !poseWithinServoRange(0.0f, 0.0f, height + v[0])) {
+                    Serial.printf(
+                        ">> 錯誤：%.1f ± %.1f mm 超出伺服角度範圍（約 ± %.1f "
+                        "mm "
+                        "以內可用）\n",
+                        height, v[0], usableHopAmplitude());
+                    break;
+                }
+                mode = MODE_HOP;
+                manualBall.present = false;
+                hopAmplitude = v[0];
+                hopPeriodS = v[1];
+                sweepStartMs = millis();
+                tiltTheta = tiltPhi = 0;
+                Serial.printf(
+                    ">> 高度振盪：%.1f ± %.1f mm，週期 %.2f 秒（l 回水平）\n",
+                    height, hopAmplitude, hopPeriodS);
+            } else
+                Serial.println(">> 格式：v 振幅 週期（秒）");
+            break;
+
         case 'a':
             if (parseNumbers(tok, n, 1, 3, v)) {
                 if (v[0] < 0 || v[0] > 180 || v[1] < 0 || v[1] > 180 ||
@@ -370,6 +530,8 @@ void handleCommand(char* line) {
                 }
                 mode = MODE_RAW;
                 manualBall.present = false;
+                // 直接角度模式下平台高度無從得知，篩選窗還原成基準高度。
+                if (USE_IR_SENSOR) irSensor.setHeight(height);
 
                 // 實際角度 = 輸入角度 + 各自 offset。
                 float out[3];
@@ -401,6 +563,7 @@ void handleCommand(char* line) {
                 }
                 mode = MODE_RAW;
                 manualBall.present = false;
+                if (USE_IR_SENSOR) irSensor.setHeight(height);
                 writeServos(v);
                 Serial.printf(
                     ">> 直接角度 %.1f / %.1f / %.1f（PCA9685 計數 %u / %u / "
@@ -644,6 +807,23 @@ void loop() {
     if (now - lastStat >= STAT_PERIOD_MS) {
         lastStat = now;
         printStat(present, px, py);
+    }
+
+    // 開迴路模式不讀球位置，所以放在紅外線檢查之前（沒接感測器也能驗證機構）。
+    if (mode == MODE_SWEEP) {
+        float t = (now - sweepStartMs) / 1000.0f;
+        tiltTheta = sweepTheta;
+        tiltPhi = fmodf(360.0f * t / sweepPeriodS, 360.0f);
+        applyTilt(tiltTheta, tiltPhi);
+        return;
+    }
+
+    if (mode == MODE_HOP) {
+        float t = (now - sweepStartMs) / 1000.0f;
+        // height 維持為基準高度，STAT 的高度欄位語意不變（GUI 的加減基準）。
+        float h = height + hopAmplitude * sinf(TWO_PI * t / hopPeriodS);
+        applyTilt(0.0f, 0.0f, h);
+        return;
     }
 
     // 手動模式與 t / l / a 之後都不跑 PID，輸入 r 恢復。

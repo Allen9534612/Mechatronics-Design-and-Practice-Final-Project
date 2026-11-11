@@ -118,3 +118,17 @@ static constexpr float PID_KD = 0.04f;
 static constexpr float PID_OUTPUT_ALPHA = 0.85f;       // 輸出低通，1 = 不濾波。
 static constexpr float PID_D_ALPHA = 0.7f;             // 微分項低通。
 static constexpr float PID_INTEGRAL_LIMIT_DEG = 2.0f;  // 積分項貢獻上限。
+
+// 開迴路驗證（w、v 指令，不讀球位置）：圓錐傾斜掃掠讓球沿盤緣繞圈，用來在調
+// PID 之前確認座標系符號與伺服方向；高度振盪用來確認伺服是否快得足以把球彈
+// 起來。
+//
+// 週期下限同時受伺服速度與控制週期限制：每個週期只有
+// 週期/CONTROL_PERIOD_MS 步，掃掠 0.5 秒是 25 步/圈（每步 14 度），再短會變成
+// 一格一格跳。振盪是單軸來回，步數可以少一些，所以下限分開設。
+static constexpr float SWEEP_TILT_DEG = 5.0f;
+static constexpr float SWEEP_PERIOD_S = 2.0f;
+static constexpr float SWEEP_MIN_PERIOD_S = 0.5f;
+static constexpr float HOP_AMPLITUDE_MM = 5.0f;
+static constexpr float HOP_PERIOD_S = 0.5f;
+static constexpr float HOP_MIN_PERIOD_S = 0.2f;

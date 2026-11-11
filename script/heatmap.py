@@ -44,6 +44,8 @@ SENSOR_FLIP_Y = False
 # 需與機構尺寸一致；超出範圍韌體會拒絕。
 HEIGHT_MIN_MM = 61.0
 HEIGHT_MAX_MM = 102.0
+SWEEP_MIN_PERIOD_S = 0.5  # 開迴路圓錐掃掠的週期下限
+HOP_MIN_PERIOD_S = 0.2  # 開迴路高度振盪的週期下限
 MIN_SPAN_MM = 40  # 色階最小跨距，避免畫面接近平坦時對比被放大成雜訊
 
 # 欄位順序需與 src/main.cpp 的 printStat() 一致。
@@ -72,7 +74,8 @@ STAT_FIELDS = [
     "d_alpha",
     "int_limit",
 ]
-MODE_NAMES = ["PID 自動平衡", "指定傾角", "直接角度"]
+# 位置對應韌體的 enum Mode，新模式只能附加在末端。
+MODE_NAMES = ["PID 自動平衡", "指定傾角", "直接角度", "圓錐掃掠", "高度振盪"]
 
 DESIGN_W, DESIGN_H = 1500, 760
 
@@ -397,6 +400,7 @@ class DemoLink:
         self.ix = self.iy = 0.0
         self.off_until = 0.0
         self.raw = None  # 直接角度模式下的三顆伺服角度。
+        self.sweep_theta, self.sweep_period, self.sweep_t0 = 5.0, 2.0, 0.0
         self.offsets = [0.0, -4.5, -4.0]
         self.thread = threading.Thread(target=self._run, daemon=True)
         tel.status, tel.connected = "DEMO 模擬資料", True
@@ -460,6 +464,27 @@ class DemoLink:
                         self.tel.add_log(
                             f">> 錯誤：傾角需在 0 ~ {self.max_tilt:.1f} 度之間"
                         )
+                elif c == "w" and len(p) == 3:
+                    th, per = float(p[1]), float(p[2])
+                    if 0 <= th <= self.max_tilt and per >= SWEEP_MIN_PERIOD_S:
+                        self.mode, self.raw = 3, None
+                        self.sweep_theta, self.sweep_period = th, per
+                        self.sweep_t0 = time.time()
+                        self.tel.add_log(
+                            f">> 圓錐掃掠：傾角 {th:.1f} 度，每 {per:.2f} 秒繞一圈（l 回水平）"
+                        )
+                    else:
+                        self.tel.add_log(">> (demo) 錯誤：傾角或週期超出範圍")
+                elif c == "v" and len(p) == 3:
+                    amp, per = float(p[1]), float(p[2])
+                    if amp > 0 and per >= HOP_MIN_PERIOD_S:
+                        self.mode, self.raw, self.theta = 4, None, 0.0
+                        self.tel.add_log(
+                            f">> 高度振盪：{self.height:.1f} ± {amp:.1f} mm，"
+                            f"週期 {per:.2f} 秒（demo 不模擬高度對伺服角度的影響）"
+                        )
+                    else:
+                        self.tel.add_log(">> (demo) 錯誤：振幅或週期超出範圍")
                 elif c == "d" and len(p) == 4:
                     v = [float(x) for x in p[1:]]
                     if all(SERVO_MIN_DEG <= a <= SERVO_MAX_DEG for a in v):
@@ -521,6 +546,13 @@ class DemoLink:
                         )
                     else:
                         self.theta *= 0.9
+                elif self.mode == 3:
+                    self.theta = self.sweep_theta
+                    self.phi = (
+                        360.0 * (t0 - self.sweep_t0) / self.sweep_period
+                    ) % 360.0
+                elif self.mode == 4:
+                    self.theta = 0.0
                 a = 9810.0 * 5.0 / 7.0 * math.sin(math.radians(self.theta)) * 0.15
                 self.vx = (self.vx + a * math.cos(math.radians(self.phi)) * dt) * 0.99
                 self.vy = (self.vy + a * math.sin(math.radians(self.phi)) * dt) * 0.99
@@ -1306,7 +1338,9 @@ class App:
         y += h + 12 * s
 
         mode = (
-            MODE_NAMES[int(stat["mode"])] if has and 0 <= int(stat["mode"]) < 3 else "—"
+            MODE_NAMES[int(stat["mode"])]
+            if has and 0 <= int(stat["mode"]) < len(MODE_NAMES)
+            else "—"
         )
         r.text(f"模式  {mode}", bx, y, 12.5 * s, TEXT, "tl", bold=True)
 
