@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 任何開發歷程（完成的工作、重大決策、已知問題等）都要記錄在本檔案的「開發歷程」章節中，保持更新。
 - 排版：C/C++ 用 `clang-format -i -style=file`（src/lib/include），Python 用 `ruff format script/` 與 `ruff check --fix script/`（指令見 README）；改完程式後先排版再 commit。
 - commit message 使用英文且盡量簡要。
-- 執行 git 操作前先問過使用者，包含 commit 及 worktree、branch 建立。
+- 每次執行 git 操作前先問過使用者，包含 commit 及 worktree、branch 建立。
 - 本地 worktree 使用完刪除。
 
 ## Project overview
@@ -116,9 +116,7 @@ There is no test suite or linter configured in this repo.
 - 2026-10-23：GUI 的「PID 增益」與「目標點與高度」卡片新增步進按鈕（與伺服卡片一致，按一下循環切換）：PID 的 Kp/Ki/Kd 共用步進 0.001/0.01/0.1（預設 0.01），目標點與高度為 0.1/0.5/1/2/5 mm（預設 1，行為不變）。只用 `--demo --snapshot` 檢查版面，未做點擊測試。
 - 2026-10-26：GUI 新增「濾波與積分」卡片，可調輸出 α、D α、積分上限（步進 0.01/0.05/0.1/0.5）。韌體新增 `f` 指令，STAT 尾端新增 `outAlpha,dAlpha,integLimit` 三欄（`STAT_FIELDS` 已同步）。右側欄改為兩欄、左欄縮窄（設計尺寸 1500x760）。驗證：`pio run -e esp32` 通過、host mock 測試通過、GUI 互動測試 38 項通過（含新卡片）；`f` 指令尚未用實體裝置驗證。
 - 2026-10-27：開發環境從 Windows 換到 Linux 後，`heatmap.py` 抓不到開發板（原本的 COM4）。查明原因：裝置本身的權限沒問題（CH340，`/dev/ttyUSB0`，核心預設給 `crw-rw-rw-`，不需加入 `dialout` 群組）；問題在 `find_port()` 的自動偵測——(1) 關鍵字只比對 `"USB-SERIAL"`（含連字號），但 Linux 下 pyserial 對 CH340 回報的描述是 `"USB Serial"`（無連字號），比對不到；(2) 比對失敗就 fallback 到 `ports[0].device`，而這台機器上 `/dev/ttyS0`~`/dev/ttyS31`（Linux 內建的虛擬序列埠）排在列表最前面，於是選到錯誤的埠。修正 `find_port()`：關鍵字加入 `"USB SERIAL"`、新增 VID:PID 比對（CH340 1A86:7523、CP210x 10C4:EA60、FTDI 0403:6001），都比對不到時優先選 `ttyUSB*`/`ttyACM*` 而非任意第一個埠。只改了 host 端腳本，沒有動韌體/MCU。驗證：`find_port()` 單獨呼叫回傳 `/dev/ttyUSB0`、`ruff format`/`ruff check` 通過（既有的 `EXE002` shebang 警告為修改前就存在，與此次改動無關）。
-<<<<<<< Updated upstream
 - 2026-11-11：`TOF_FILTER_MIN_DISTANCE`/`TOF_FILTER_MAX_DISTANCE`（感測器區域有效性的距離篩選窗）原本是固定值，不會隨平台高度調整。改成 `IRSensorArray::setHeight(heightMm)`：以 `PLATFORM_DEFAULT_HEIGHT_MM`（82.6 mm）量測到的 10~500 mm 為基準，依目前高度與基準高度的差距整段平移（感測器固定在機構上方往下看，使用者實測確認 `height` 數字增加＝平台降低＝感測器到平台距離變遠，兩者視為 1:1 mm 對 mm 的近似）。`main.cpp` 在 `setup()` 與 `h` 指令改高度後都會呼叫 `setHeight()`。驗證：`pio run -e esp32` 通過；只改了距離篩選窗的計算方式，沒有動運動學或 PID。尚未用實體裝置在不同高度下驗證窗口平移後的偵測率。
-=======
 - 2026-11-11：新增兩個開迴路驗證模式（為後續的「連續彈球」與「球繞圈」閉迴路
   模式鋪路）。架構決定：繞圈的閉迴路版本是「現有 PID + 會動的目標點」而不是新
   控制器，所以水平（目標點軌跡）與垂直（平台高度）拆成兩個正交的軸，不把組合
@@ -152,7 +150,6 @@ There is no test suite or linter configured in this repo.
     17 項通過；`--demo --snapshot` 版面正常。測試腳本放在暫存目錄，未納入 repo。
   - **尚未實機驗證**：`w`/`v` 都還沒上傳到開發板跑過，第一次請用小傾角/小振幅
     （例如 `w 3 3`、`v 2 1`）確認方向與機構沒問題再加大。
->>>>>>> Stashed changes
 - 2026-11-11（接續）：併入 `11a1d29`（ToF 距離篩選窗依平台高度平移）後調整開迴路
   模式。原本 `IRSensorArray::setHeight()` 只在 `setup()` 與 `h` 指令呼叫，但
   `MODE_HOP` 的平台高度每個控制週期都在變，篩選窗會停在基準高度不動。改成由
