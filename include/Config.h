@@ -91,10 +91,10 @@ static constexpr uint8_t SERVO_CHANNEL[3] = {0, 1, 2};
 //                 用於判斷姿態是否可達。必須落在安全角度之內。
 static constexpr float SERVO_HARD_MIN_DEG = 0.0f;
 static constexpr float SERVO_HARD_MAX_DEG = 180.0f;
-static constexpr float SERVO_SAFE_MIN_DEG = 40.0f;
-static constexpr float SERVO_SAFE_MAX_DEG = 140.0f;
-static constexpr float SERVO_RANGE_MIN_DEG = 40.0f;
-static constexpr float SERVO_RANGE_MAX_DEG = 140.0f;
+static constexpr float SERVO_SAFE_MIN_DEG = 20.0f;
+static constexpr float SERVO_SAFE_MAX_DEG = 160.0f;
+static constexpr float SERVO_RANGE_MIN_DEG = 20.0f;
+static constexpr float SERVO_RANGE_MAX_DEG = 160.0f;
 
 // 伺服校正：角度 = neutral + gain * (模型角 - 水平時的模型角) + offset，
 // 再限制在 [minDeg, maxDeg]。gain 為 +1 或 -1（馬達裝反時用 -1）。
@@ -145,11 +145,18 @@ static constexpr bool ALLOW_ARM_BELOW_BASE = true;
 
 // 高度下限。ALLOW_ARM_BELOW_BASE 為 false 時不要低於 62（60.5 是模型角 90 度
 // 的交界，留約 2 度餘裕）；設為 true 後可往下放寬。
-static constexpr float PLATFORM_MIN_HEIGHT_MM = 50.0f;
-// 96.9 是伺服安全角度允許的上限（100 時水平姿態就要 143.8 度，超過 140 會被
-// 夾限，平台會歪）。下限 50 的餘裕是 31 度，開了 ALLOW_ARM_BELOW_BASE 後最低
-// 可到約 30.3 mm。
-static constexpr float PLATFORM_MAX_HEIGHT_MM = 96.9f;
+//
+// 上限實際上有三層，由低到高（以目前的伺服安全角度與 NVS offset 計算）：
+//   96.9  舊的 40~140 安全角度下的上限（現在放寬到 20~160 已非瓶頸）
+//   101.67  computeMaxTilt() 歸零的高度——可達傾角不足
+//   KINEMATICS_TILT_MARGIN_DEG
+//           的安全餘裕時回傳 0，h 指令會報「這個高度無法保持水平」
+//   102.33  機構硬極限 maxHeight()＝連桿與擺臂完全伸直成一直線
+//           （sqrt((l1+l2)^2 - (lp-lb)^2)），再高運動學無解
+// 下限則受伺服安全角度限制：目前 20~160 對應高度約 20.1 mm（h=20 時伺服角
+// 19.9 度，差 0.1 度會被夾限）。
+static constexpr float PLATFORM_MIN_HEIGHT_MM = 20.0f;
+static constexpr float PLATFORM_MAX_HEIGHT_MM = 100.0f;
 static constexpr float HEIGHT_SCAN_STEP_MM = 0.1f;
 
 // 逆向運動學求最大傾角（computeMaxTilt）的二分搜尋範圍、收斂門檻、方向取樣
