@@ -15,7 +15,8 @@ double PlatformKinematics::minHeight() const {
 }
 
 bool PlatformKinematics::solveVector(double a, double b, double c, double h,
-                                     float modelDeg[3]) const {
+                                     float modelDeg[3],
+                                     bool armBelowBase) const {
     const double s3 = sqrt(3.0);
 
     // 上盤球關節 A1~A3。
@@ -76,7 +77,10 @@ bool PlatformKinematics::solveVector(double a, double b, double c, double h,
 
     if (z1 < 0 || z2 < 0 || z3 < 0) return false;
 
-    double c13 = sqrt(z1), c23 = sqrt(z2), c33 = sqrt(z3);
+    // 擺臂末端的 Z。取正根時擺臂不低於基座平面（模型角 <= 90）；取負根讓擺臂
+    // 擺到水平線以下，模型角 > 90，平台可以降得更低。
+    double zs = armBelowBase ? -1.0 : 1.0;
+    double c13 = zs * sqrt(z1), c23 = zs * sqrt(z2), c33 = zs * sqrt(z3);
 
     // 擺臂角度。
     double th1 = M_PI / 2 - atan2(sqrt(c11 * c11 + c12 * c12) - lb, c13);
@@ -94,31 +98,32 @@ bool PlatformKinematics::solveVector(double a, double b, double c, double h,
 }
 
 bool PlatformKinematics::solveSpherical(float thetaDeg, float phiDeg, float h,
-                                        float modelDeg[3]) const {
+                                        float modelDeg[3],
+                                        bool armBelowBase) const {
     double th = radians(thetaDeg);
     double ph = radians(phiDeg);
     double a = sin(th) * cos(ph);
     double b = sin(th) * sin(ph);
     double c = cos(th);
-    return solveVector(a, b, c, h, modelDeg);
+    return solveVector(a, b, c, h, modelDeg, armBelowBase);
 }
 
-float PlatformKinematics::computeMaxTilt(float h) const {
-    float lo = 0.0f, hi = 25.0f;
+float PlatformKinematics::computeMaxTilt(float h, bool armBelowBase) const {
+    float lo = 0.0f, hi = KINEMATICS_TILT_SEARCH_MAX_DEG;
     float tmp[3];
 
-    if (!solveSpherical(0.0f, 0.0f, h, tmp)) return 0.0f;
+    if (!solveSpherical(0.0f, 0.0f, h, tmp, armBelowBase)) return 0.0f;
 
-    while (hi - lo > 0.05f) {
+    while (hi - lo > KINEMATICS_TILT_TOLERANCE_DEG) {
         float mid = (lo + hi) / 2;
         bool ok = true;
-        for (int phi = 0; phi < 360 && ok; phi += 10)
-            ok = solveSpherical(mid, (float)phi, h, tmp);
+        for (int phi = 0; phi < 360 && ok; phi += KINEMATICS_TILT_PHI_STEP_DEG)
+            ok = solveSpherical(mid, (float)phi, h, tmp, armBelowBase);
 
         if (ok)
             lo = mid;
         else
             hi = mid;
     }
-    return max(0.0f, lo - 0.5f);
+    return max(0.0f, lo - KINEMATICS_TILT_MARGIN_DEG);
 }

@@ -93,9 +93,17 @@ float modelToServo(int leg, float modelDeg) {
 // 角度允許的範圍大（例如預設高度下 IK 可到 16.3 度，但伺服只到 12 度），超出
 // 時 modelToServo() 會夾限、實際姿態與指令不符。開迴路模式會連續停在極限附近，
 // 所以下指令時先檢查整段軌跡。
+// 低於擺臂水平的交界高度時要改取負根，解才會連續延伸（見 Config.h 的
+// ALLOW_ARM_BELOW_BASE）。交界高度就是 kinematics.minHeight()。
+bool armBelowBaseFor(float h) {
+    return ALLOW_ARM_BELOW_BASE && h < (float)kinematics.minHeight();
+}
+
 bool poseWithinServoRange(float thetaDeg, float phiDeg, float h) {
     float model[3];
-    if (!kinematics.solveSpherical(thetaDeg, phiDeg, h, model)) return false;
+    if (!kinematics.solveSpherical(thetaDeg, phiDeg, h, model,
+                                   armBelowBaseFor(h)))
+        return false;
     for (int i = 0; i < 3; i++) {
         float a = rawServoAngle(i, model[i]);
         if (a < servoCal[i].minDeg || a > servoCal[i].maxDeg) return false;
@@ -103,12 +111,53 @@ bool poseWithinServoRange(float thetaDeg, float phiDeg, float h) {
     return true;
 }
 
+// 平台高度的容許範圍：真正的限制是「水平姿態下三顆伺服都還在角度範圍內」，
+// 不是 kinematics.minHeight()/maxHeight()。那兩個是解析式的保守估計
+// （minHeight 算的是擺臂完全水平朝外那一刻，實際上求解器在更低的高度仍有解），
+// 用它們當門檻會把可用範圍砍掉一大截。這裡改成從預設高度往兩邊掃描，找出水平
+// 姿態不會被 modelToServo() 夾限的範圍，再與 Config.h 的設定取交集
+// （PLATFORM_MIN/MAX_HEIGHT_MM 當硬性邊界，避免掃到機構會干涉的姿態）。
+// 平台高度的可用範圍直接來自 Config.h，不再被運動學或伺服掃描覆寫
+// （Config.h 的 PLATFORM_MIN/MAX_HEIGHT_MM 是唯一來源）。
+float minUsableHeight() { return PLATFORM_MIN_HEIGHT_MM; }
+
+float maxUsableHeight() { return PLATFORM_MAX_HEIGHT_MM; }
+
+// 開機時檢查設定的高度範圍是否真的做得到，做不到只警告、不阻擋——無法自動
+// 判斷 Config 的機構尺寸是否與實體相符，所以由使用者決定。
+void warnHeightRange() {
+    float crossing = (float)kinematics.minHeight();
+    if (PLATFORM_MIN_HEIGHT_MM < crossing && !ALLOW_ARM_BELOW_BASE)
+        Serial.printf(
+            "警告：高度下限 %.1f mm 低於擺臂水平的交界 %.1f mm，但 "
+            "ALLOW_ARM_BELOW_BASE 為 false。低於交界時求解器會跳到鏡像解，伺服"
+            "角反向、實際高度與指令不符。請把下限提高到 %.1f 以上，或確認擺臂"
+            "往下擺不會撞到底板後開啟 ALLOW_ARM_BELOW_BASE。\n",
+            PLATFORM_MIN_HEIGHT_MM, crossing, crossing + 1.5f);
+    if (ALLOW_ARM_BELOW_BASE)
+        Serial.printf(
+            "注意：ALLOW_ARM_BELOW_BASE 已開啟，低於 %.1f mm 時擺臂會擺到基座"
+            "平面以下，請確認機構不會干涉。\n",
+            crossing);
+
+    for (int i = 0; i < 2; i++) {
+        float h = i ? PLATFORM_MAX_HEIGHT_MM : PLATFORM_MIN_HEIGHT_MM;
+        if (!poseWithinServoRange(0.0f, 0.0f, h))
+            Serial.printf(
+                "警告：高度%s %.1f mm 的水平姿態超出伺服角度範圍 %.0f~%.0f "
+                "度，實際會被夾限。\n",
+                i ? "上限" : "下限", h, SERVO_RANGE_MIN_DEG,
+                SERVO_RANGE_MAX_DEG);
+    }
+}
+
 // 目前高度下，全方向都不會夾限的最大傾角（0 表示連最小傾角都不行）。
 float usableSweepTilt() {
     float usable = 0.0f;
-    for (float th = 0.5f; th <= maxTilt; th += 0.5f) {
+    for (float th = RANGE_SCAN_TILT_STEP_DEG; th <= maxTilt;
+         th += RANGE_SCAN_TILT_STEP_DEG) {
         bool all = true;
-        for (float phi = 0.0f; phi < 360.0f; phi += 5.0f)
+        for (float phi = 0.0f; phi < 360.0f; phi += RANGE_SCAN_PHI_STEP_DEG)
             if (!poseWithinServoRange(th, phi, height)) {
                 all = false;
                 break;
@@ -122,7 +171,8 @@ float usableSweepTilt() {
 // 以目前高度為基準，上下都不會夾限的最大振幅。
 float usableHopAmplitude() {
     float usable = 0.0f;
-    for (float a = 0.5f; a <= 40.0f; a += 0.5f) {
+    for (float a = RANGE_SCAN_AMP_STEP_MM; a <= RANGE_SCAN_AMP_MAX_MM;
+         a += RANGE_SCAN_AMP_STEP_MM) {
         if (!poseWithinServoRange(0.0f, 0.0f, height - a) ||
             !poseWithinServoRange(0.0f, 0.0f, height + a))
             break;
@@ -142,7 +192,9 @@ void writeServos(const float servoDeg[3]) {
 // 的 height）。無解時維持原姿態並回傳 false。
 bool applyTilt(float thetaDeg, float phiDeg, float h = height) {
     float model[3];
-    if (!kinematics.solveSpherical(thetaDeg, phiDeg, h, model)) return false;
+    if (!kinematics.solveSpherical(thetaDeg, phiDeg, h, model,
+                                   armBelowBaseFor(h)))
+        return false;
 
     float servo[3];
     for (int i = 0; i < 3; i++) servo[i] = modelToServo(i, model[i]);
@@ -276,16 +328,21 @@ void printStatus() {
 
 // 輸出一行狀態，欄位順序需與 script/heatmap.py 的 STAT_FIELDS 一致：
 // STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,
-//      maxTilt,distMm,validZones,integX,integY,outAlpha,dAlpha,integLimit
-// mode 為 Mode 的數值，x、y 為平台座標（mm）。
+//      maxTilt,distMm,validZones,integX,integY,outAlpha,dAlpha,integLimit,
+//      hMin,hMax,servoMin,servoMax
+// mode 為 Mode 的數值，x、y 為平台座標（mm）。最後四欄是 Config.h 的高度與
+// 伺服安全角度上下限，GUI 以此為準，不要在 GUI 另外寫死。
 void printStat(bool present, float px, float py) {
     Serial.printf(
         "STAT,%d,%d,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.4f,%.4f,%.4f,%.1f,"
-        "%.1f,%.1f,%.1f,%.1f,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+        "%.1f,%.1f,%.1f,%.1f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,"
+        "%.1f\n",
         (int)mode, present ? 1 : 0, px, py, tiltTheta, tiltPhi, lastServo[0],
         lastServo[1], lastServo[2], pid.kp, pid.ki, pid.kd, targetX, targetY,
         height, maxTilt, lastDistMm, lastValidZones, pid.integralX(),
-        pid.integralY(), pid.outputAlpha, pid.dAlpha, pid.integralLimit);
+        pid.integralY(), pid.outputAlpha, pid.dAlpha, pid.integralLimit,
+        minUsableHeight(), maxUsableHeight(), SERVO_SAFE_MIN_DEG,
+        SERVO_SAFE_MAX_DEG);
 }
 
 // 以空白或逗號切字，回傳字詞數。
@@ -464,7 +521,8 @@ void handleCommand(char* line) {
                     break;
                 }
                 bool reachable = true;
-                for (float phi = 0.0f; phi < 360.0f; phi += 1.0f)
+                for (float phi = 0.0f; phi < 360.0f;
+                     phi += SWEEP_PHI_CHECK_STEP_DEG)
                     if (!poseWithinServoRange(v[0], phi, height)) {
                         reachable = false;
                         break;
@@ -523,9 +581,13 @@ void handleCommand(char* line) {
 
         case 'a':
             if (parseNumbers(tok, n, 1, 3, v)) {
-                if (v[0] < 0 || v[0] > 180 || v[1] < 0 || v[1] > 180 ||
-                    v[2] < 0 || v[2] > 180) {
-                    Serial.println(">> 錯誤：角度需在 0 ~ 180 之間");
+                bool outOfRange = false;
+                for (int i = 0; i < 3; i++)
+                    if (v[i] < SERVO_HARD_MIN_DEG || v[i] > SERVO_HARD_MAX_DEG)
+                        outOfRange = true;
+                if (outOfRange) {
+                    Serial.printf(">> 錯誤：角度需在 %.0f ~ %.0f 之間\n",
+                                  SERVO_HARD_MIN_DEG, SERVO_HARD_MAX_DEG);
                     break;
                 }
                 mode = MODE_RAW;
@@ -536,7 +598,8 @@ void handleCommand(char* line) {
                 // 實際角度 = 輸入角度 + 各自 offset。
                 float out[3];
                 for (int i = 0; i < 3; i++)
-                    out[i] = constrain(v[i] + servoCal[i].offset, 0.0f, 180.0f);
+                    out[i] = constrain(v[i] + servoCal[i].offset,
+                                       SERVO_HARD_MIN_DEG, SERVO_HARD_MAX_DEG);
 
                 writeServos(out);  // 不受 minDeg/maxDeg 限制，校正時請小心。
                 Serial.printf(
@@ -651,15 +714,14 @@ void handleCommand(char* line) {
 
         case 'h':
             if (parseNumbers(tok, n, 1, 1, v)) {
-                if (v[0] < kinematics.minHeight() ||
-                    v[0] > kinematics.maxHeight()) {
+                if (v[0] < minUsableHeight() || v[0] > maxUsableHeight()) {
                     Serial.printf(">> 錯誤：高度需在 %.1f ~ %.1f mm 之間\n",
-                                  kinematics.minHeight(),
-                                  kinematics.maxHeight());
+                                  minUsableHeight(), maxUsableHeight());
                     break;
                 }
                 float newMax =
-                    min(kinematics.computeMaxTilt(v[0]), MAX_TILT_DEG);
+                    min(kinematics.computeMaxTilt(v[0], armBelowBaseFor(v[0])),
+                        MAX_TILT_DEG);
                 if (newMax <= 0) {
                     Serial.println(">> 錯誤：這個高度無法保持水平");
                     break;
@@ -732,8 +794,10 @@ void setup() {
         Serial.println("逆向運動學在預設高度無解，請檢查機構尺寸");
         while (1) delay(1000);
     }
-    maxTilt = min(kinematics.computeMaxTilt(height), MAX_TILT_DEG);
+    maxTilt = min(kinematics.computeMaxTilt(height, armBelowBaseFor(height)),
+                  MAX_TILT_DEG);
     loadServoOrigin();
+    warnHeightRange();
 
     Serial.println("Servo system ready!");
     Serial.printf("水平時模型角: %.2f / %.2f / %.2f，最大傾角 %.1f 度\n",

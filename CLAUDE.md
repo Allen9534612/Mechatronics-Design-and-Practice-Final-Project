@@ -42,6 +42,16 @@ There is no test suite or linter configured in this repo.
 ## Architecture
 
 - `platformio.ini`：`esp32`（預設，`nodemcu-32s`）依賴 ESP32Servo、Adafruit PWM Servo Driver、stm32duino/VL53L7CX；`mega`/`uno` 僅保留設定，現有程式碼只能在 esp32 編譯。`[env] build_flags = -Iinclude` 讓 `lib/*` 也能 `#include "Config.h"`。
+- 容許值一律放 `Config.h`：伺服角度分成 `SERVO_RANGE_MIN/MAX_DEG`（機構工作範
+  圍，運動學輸出與 `d` 指令用，`SERVO_CAL_DEFAULT` 的 minDeg/maxDeg 由它填）與
+  `SERVO_HARD_MIN/MAX_DEG`（伺服物理極限，校正用的 `a` 指令與
+  `ServoMotor::setAngle()` 的最終夾限、脈寬換算用）；平台高度為
+  `PLATFORM_MIN/MAX_HEIGHT_MM`，由 `main.cpp` 的 `minUsableHeight()/
+  maxUsableHeight()` 與運動學可達範圍取交集（作法與 `MAX_TILT_DEG` 相同）。
+  **這些都是機構範圍，不等於伺服角度實際允許的範圍**——後者更窄，由
+  `poseWithinServoRange()` 在下指令時實際檢查。另有運動學搜尋參數
+  （`KINEMATICS_TILT_*`）與開迴路軌跡檢查的掃描解析度（`SWEEP_PHI_CHECK_STEP_DEG`、
+  `RANGE_SCAN_*`）。
 - `include/Config.h`：**全專案唯一的設定來源**（I2C 腳位：VL53L7CX 用 `Wire` SDA=22/SCL=21、PCA9685 用獨立的 `Wire1` SDA=18/SCL=19；VL53L7CX 參數與篩選門檻、感測器座標旋轉/翻轉、PCA9685 與伺服脈寬、伺服校正 `SERVO_CAL_DEFAULT`、平台機構尺寸、`MAX_TILT_DEG`、PID 預設增益等）。`src/main.cpp` 與所有 `lib/*` 都 include 它，不要在其他檔案重複定義常數。
 - 資料流（`src/main.cpp` 的 `loop()`，`CONTROL_PERIOD_MS` 週期）：
   1. `lib/IRSensorArray`：透過 I2C 驅動 VL53L7CX，`readData()` 取得 4x4/8x8 的 `grid_strength`、`grid_dist`（無效區域為 0）與有效區域數；`changeResolution(4|8)` 切換解析度。
@@ -52,7 +62,7 @@ There is no test suite or linter configured in this repo.
   6. `lib/ServoMotor`：透過 PCA9685（接在 `Wire1`，與感測器分開的匯流排）輸出 PWM，`setAngle(channel, angle)`。
   `main.cpp` 的 `modelToServo()` 依 `servoCal`（neutral/gain/offset/限幅）把模型角轉成伺服角。`maxTilt = min(運動學可達最大傾角, MAX_TILT_DEG)`。
 - 序列埠：`DATA,<N>,<N*N 個距離>,<gridX>,<gridY>` 供 `script/heatmap.py` 使用，**gridX/gridY 維持格點座標、無球為 -1**；指令列表輸入 `?` 查看。
-- 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY,outAlpha,dAlpha,integLimit`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。韌體不再週期性輸出人類可讀狀態列，指令回覆（`>>` 開頭）與 `s` 指令仍保留。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
+- 序列埠另有 `STAT,mode,present,x,y,theta,phi,s1,s2,s3,kp,ki,kd,targetX,targetY,height,maxTilt,distMm,validZones,integX,integY,outAlpha,dAlpha,integLimit,hMin,hMax,servoMin,servoMax`（每 `STAT_PERIOD_MS` 一次，不受模式限制；由 `main.cpp` 的 `printStat()` 輸出）。韌體不再週期性輸出人類可讀狀態列，指令回覆（`>>` 開頭）與 `s` 指令仍保留。**改欄位時 `script/heatmap.py` 的 `STAT_FIELDS` 要同步。**
 - `script/heatmap.py`：moderngl（OpenGL 3.3）+ pygame 的監控 GUI，視窗可任意縮放（版面等比例縮放），配色為中性灰階加單一強調色。左側為資料流數值（感測器 → 位置估測 → PID → 伺服），中間為距離熱圖（色階依畫面內距離範圍自動調整）、球位置、傾斜方向與韌體訊息，右側分兩欄，為可調項（第一欄：解析度、自動/回水平、PID、濾波與積分；第二欄：目標點、高度、伺服角度與原點、指令輸入框、提示）與懸停提示。pyserial 背景執行緒收發並自動重連，顯示值一律以 STAT 為準。程式以 DPI-aware 啟動（避免 Windows 縮放造成模糊），啟動時偵測顯卡並在左下角顯示實際渲染的 GPU；用到內顯而系統有獨顯時會警示，`--gpu high` 可寫入 Windows 圖形偏好（`HKCU\Software\Microsoft\DirectX\UserGpuPreferences`）並重新啟動。GUI 內的 `SERVO_MIN_DEG/MAX_DEG` 需與 Config.h 一致。
 - PID 濾波：`f 輸出α D的α 積分上限` 設定 `outputAlpha`/`dAlpha`/`integralLimit`（α 需在 (0,1]、上限 >= 0，不清除積分，不存 NVS，重開機回到 `Config.h` 預設）。
 - 伺服原點校正：`d a1 a2 a3` 直接設定三顆伺服的實際角度（不加 offset，限制在各自的 `minDeg~maxDeg`，進入「直接角度」模式、自動平衡暫停）；`o` 把目前的 `d` 角度寫入為水平原點（`offset = 角度 − neutral`，存進 ESP32 的 NVS 並在開機時載入，斷電保留；只在直接角度模式且 PCA9685 有連線時允許）；`o r` 還原成 `Config.h` 的 `SERVO_CAL_DEFAULT` 並清除儲存值。`l`（回水平）與自動平衡都以 `neutral + offset` 為水平角度。GUI 的「伺服角度與原點」卡片對應這三個指令（寫入原點要在 3 秒內按兩次確認）。
@@ -163,3 +173,132 @@ There is no test suite or linter configured in this repo.
   - 驗證：`pio run -e esp32` 成功無警告；新增 53 項篩選窗檢查（振盪期間板面全程
     在窗內、未觸及夾限時餘裕完全不變、跟著走的餘裕不低於不跟著走、離開後還原、
     夾限行為）全數通過；先前的 108 項掃掠/振盪檢查與 demo 互動測試無回歸。
+- 2026-11-11（接續）：把散落各處的容許值收進 `Config.h`（全部為等值替換，行為
+  不變）。原本硬編在四個地方：`SERVO_CAL_DEFAULT` 裡重複三次的 `40.0f, 140.0f`、
+  `a` 指令與 `ServoMotor::setAngle()` 的 `0~180`、`computeMaxTilt()` 的搜尋上限
+  `25`／收斂門檻 `0.05`／方向取樣 `10`／安全餘裕 `0.5`、以及開迴路模式的掃描
+  步進。新增 `SERVO_RANGE_MIN/MAX_DEG`、`SERVO_HARD_MIN/MAX_DEG`、
+  `PLATFORM_MIN/MAX_HEIGHT_MM`、`KINEMATICS_TILT_*`、`SWEEP_PHI_CHECK_STEP_DEG`、
+  `RANGE_SCAN_*`（見上方 Architecture）。
+  - 伺服角度刻意分成兩組：工作範圍（40~140，運動學與 `d` 指令）與物理極限
+    （0~180，只有校正用的 `a` 指令和脈寬換算會用到）。原本兩者都是魔術數字，
+    混在一起看不出差別。`ServoMotor` 的脈寬換算同步改成
+    `(angle - SERVO_HARD_MIN_DEG) / span`，`SERVO_HARD_MIN_DEG`=0 時與原式等價。
+  - 平台高度新增 `minUsableHeight()/maxUsableHeight()`，與運動學取交集。這順帶
+    修掉一個 GUI/韌體不一致：`heatmap.py` 寫 61~102，但韌體原本只檢查運動學的
+    60.5~102.3，GUI 擋得比韌體嚴。現在兩邊都是 61~102，GUI 的常數也加上對應的
+    Config 名稱註解。
+  - 驗證：`pio run -e esp32` 成功無警告；新增 32 項等價性檢查（工作範圍與物理
+    極限數值未變、脈寬換算在 0/40/90/140/180 度與舊式相同、`computeMaxTilt()`
+    仍為 16.3 度、可用傾角仍為 12.0 度、可用振幅仍為 ±14.5mm、常數間的關係如
+    工作範圍落在物理極限內）全數通過；既有的 108 + 53 + demo 測試無回歸。
+- 2026-11-11（接續）：平台高度下限從 60.5 mm 降到 41 mm。原因是
+  `minUsableHeight()` 原本用 `PlatformKinematics::minHeight()`，而那是個**保守的
+  解析式估計**，不是求解器的真正極限——它算的是「擺臂完全水平朝外」那一刻的
+  高度（`sqrt(l1² - (lb + l2 - lp)²)` = 60.46），但 `solveSpherical()` 在更低的
+  高度仍然有解（實測一路到 0 都有解；連桿可及範圍是 17~107 mm，h=0 時轉軸到球
+  接頭才 31.25 mm，根本沒超出）。所以把 `PLATFORM_MIN_HEIGHT_MM` 改小沒有用，
+  `max()` 會被 60.46 蓋掉。
+  - 改成從預設高度往兩邊掃描，找「水平姿態下三顆伺服都不被 `modelToServo()`
+    夾限」的範圍，再以 `PLATFORM_MIN/MAX_HEIGHT_MM` 當硬性邊界往內收。目前校正
+    值（NVS offset 23/23/27）下實際範圍是 **41.0 ~ 96.9 mm**；純以伺服角度算
+    可到約 28 mm，41 是 Config 的硬性下限擋住的。
+  - 上限順帶修掉一個舊問題：原本 `h 100` 會被接受，但水平時伺服角度就要 143.8
+    度（超出 140），平台連水平都站不住且三腳夾限程度不同會變歪。現在上限
+    96.9 mm，`h 100` 會被拒絕。
+  - 掃描用整數步數算高度（`PLATFORM_DEFAULT_HEIGHT_MM - i * HEIGHT_SCAN_STEP_MM`）
+    而不是反覆加減浮點數，否則累積誤差會讓掃到硬性邊界時回傳 41.000004——顯示
+    成 41.0 但輸入 `h 41` 會被拒絕。`h` 指令的比較另外留半個掃描步進的容差。
+  - **注意**：高度壓到 60 mm 以下時擺臂會低於轉軸平面（41 mm 時模型角約 65 度，
+    預設高度是 88 度），`minHeight()` 原本大概就是想避開這個區域。調低前請先用
+    `d` 指令手動確認機構不會干涉。`PLATFORM_MIN_HEIGHT_MM` 就是用來擋這個的。
+  - 另：`s` / `h` 回報的「最大傾角」仍是機構值（`MAX_TILT_DEG` 夾過的
+    `computeMaxTilt()`），不是伺服實際允許的角度——例如 41 mm 時回報 15 度但
+    伺服只到 11 度。`w` 指令用的是嚴格的伺服檢查，`t` 仍用舊的機構判斷。
+  - 驗證：`pio run -e esp32` 無警告；新增 15 項高度範圍檢查（範圍內每一點水平
+    都不夾限、邊界外確實不可用、顯示值可直接輸入、掃到硬性邊界回傳精確值）；
+    既有 108 + 53 + 32 項全部重新編譯後無回歸；實機確認 `h 30`/`h 100` 被拒、
+    `h 41`/`h 96.9`/`h 60` 被接受。
+- 2026-11-11（更正）：**撤回前一則「平台高度下限可以降到 41 mm」的結論，那是
+  錯的**，而且當時已經上傳到開發板。兩個錯誤：
+  - **高度方向說反了**：`h` 是平台中心離基座的高度，`maxHeight()` 是連桿完全
+    伸直（`l1+l2`=107）＝平台**最高**，所以 **h 越大＝平台越高**。先前寫成
+    「數字越大＝平台越低」是照抄 merge 進來的 `11a1d29` 註解而沒有驗證。那段
+    註解的推理（「感測器裝在上方往下看」＋「高度增加＝平台降低」）兩處都不對，
+    不過 `setHeight()` 的公式（+delta）剛好仍然正確——感測器在壓克力板**下方**，
+    平台升高＝離感測器更遠。
+  - **`minHeight()` 不是保守估計，是機構奇異點**：模型角在 h≈60.46 達到極大值
+    （89.9 度，擺臂轉到水平），再低就折回另一個解分支。實測同一個模型角對應兩
+    個高度：64.63 度 →{80.6, 42}、76.20 度 →{71.5, 50}。我們只能控制伺服角度，
+    所以從預設高度下 `h 41` 送出的角度同時也是 h≈80.6 的角度，平台會停在上分支
+    的 80.6 mm，**根本到不了 41**。低於奇異點的高度需要讓擺臂穿過水平姿態翻到
+    另一分支，不是下指令能做到的。
+  - 修正：新增 `heightFloor()` = max(奇異點, `PLATFORM_MIN_HEIGHT_MM`)，
+    `minUsableHeight()` 從它開始掃描。可用範圍回到 **60.5 ~ 96.9 mm**（上限仍是
+    上一輪修好的伺服限制，`h 100` 會被拒絕）。
+  - 依需求把 minHeight 參數化：`Config.h` 新增
+    `PLATFORM_KINEMATIC_MIN_HEIGHT_MM`，設 0（預設）表示自動用
+    `PlatformKinematics::minHeight()` 算，只有在實際機構與 Config 的尺寸不符、
+    量測出不同的奇異點位置時才填實測值覆寫。`PLATFORM_MIN_HEIGHT_MM` 維持原本
+    「再往內收的硬性邊界」語意，不會讓範圍超出奇異點。
+  - `heatmap.py` 的 `HEIGHT_MIN_MM` 同步改為 60.5（原本跟著改成 41）。
+  - 驗證（全部在 host 端，未動馬達、未上傳）：`pio run -e esp32` 無警告；新增
+    15 項檢查（maxHeight 即連桿伸直、模型角極大值落在 minHeight、奇異點以下的
+    高度全都在上分支有同角度對應點 9/9、修正後下限不低於奇異點、可用範圍內模型
+    角對高度嚴格單調＝未跨越奇異點、41 mm 已被拒絕）；既有 108 + 53 + 32 項
+    重新編譯後無回歸。
+  - **開發板上目前仍是錯誤版本（下限 41）**，重新上傳前請勿用 `h` 設低於 60.5
+    的值——那會讓平台跑到上分支的另一個高度，而不是你以為的低位置。
+- 2026-11-11（接續）：依需求把高度與伺服角度的上下限收斂成 **Config.h 單一來源，
+  其他模組一律尊重**。起因是使用者把下限改成 50 卻「還是卡在 60.5」——實際擋住
+  的是 `heatmap.py` 自己抄的 `HEIGHT_MIN_MM`，同一個限制散在 Config.h、main.cpp
+  的推導邏輯、GUI 常數三個地方。
+  - **高度**：`PLATFORM_MIN/MAX_HEIGHT_MM` 成為唯一來源，`minUsableHeight()/
+    maxUsableHeight()` 直接回傳它們，不再被運動學或伺服掃描覆寫（移除
+    `heightFloor()`、`PLATFORM_KINEMATIC_MIN_HEIGHT_MM` 與掃描邏輯）。目前設定
+    50.0 ~ 96.9 mm。
+  - 改以**開機警告**取代阻擋：`warnHeightRange()` 在設定低於機構奇異點、或上下
+    限的水平姿態超出伺服角度時印警告但不阻擋——無法自動判斷 Config 的機構尺寸
+    是否與實體相符，所以由使用者決定。實機確認警告會印出。
+  - **伺服安全角度**：新增 `SERVO_SAFE_MIN/MAX_DEG`，由
+    `ServoMotor::setAngle()` 夾限，是所有模組（含 `a`/`d` 指令與未來新增的模式）
+    的最後防線。角度設定現在分三層：`SERVO_HARD_*`（物理量程，只用於脈寬刻度）
+    ⊇ `SERVO_SAFE_*`（安全角度）⊇ `SERVO_RANGE_*`（運動學工作範圍）。
+  - **GUI 不再抄設定**：STAT 末端新增 `hMin,hMax,servoMin,servoMax` 四欄
+    （23 → 27 欄），`heatmap.py` 的 `App.limit()` 一律以 STAT 為準，原本的常數
+    降級成「尚未連線時的後備值」。改 Config.h 後 GUI 自動跟著變，不需要改
+    Python。新增一項 Config.h↔GUI 後備值的一致性檢查（解析兩個檔案比對）。
+  - 驗證：`pio run -e esp32` 無警告；新增 20 項（Config 為唯一來源、安全角度對
+    9 種輸入都夾進範圍、三層角度關係、設定範圍內無姿態被夾限）＋ GUI 11 項
+    （27 欄、`limit()` 的 STAT/後備值切換、韌體改設定時 GUI 跟著變）＋ 一致性
+    4 項；既有 108 + 53 + 32 項無回歸。已上傳，實機確認 `h 50`/`h 55`/`h 96.9`
+    接受、`h 49`/`h 97` 拒絕、STAT 27 欄且四個限制值正確、開機警告正常。
+  - **保留的已知事實**：`h 50` 雖然被接受，但 50 mm 在奇異點以下，平台實際會停
+    在上分支的對應高度（模型角 76.2 度 ↔ 71.5 mm），不是 50 mm。要真的降低平台
+    必須改機構尺寸（`Config.h` 的 lp/l1/l2/lb），例如連桿 l1 從 62 縮到 51.9 可
+    讓奇異點降到 50 mm，代價是最高高度從 102.3 降到 91.7。
+- 2026-11-11（更正 2）：**「60.5 mm 是機構奇異點」也是錯的**，使用者實測指出機構
+  在該點沒有折返（搖桿與推桿並未共線），反轉的是伺服角度。查 `solveVector()`
+  後確認這是**程式的分支選擇問題**：
+  - `PlatformKinematics.cpp` 原本寫 `double c13 = sqrt(z1), c23 = sqrt(z2),
+    c33 = sqrt(z3);`——`c?3` 是擺臂末端關節的 Z 座標，一律取正根，等於強制擺臂
+    末端不得低於基座平面。`th = atan2(..., c13)` 因此被限制，模型角上限正好是
+    90 度（擺臂水平，Z=0）。
+  - 低於該高度時求解器不是沿著負的 Z 延伸，而是跳到鏡像解，所以模型角由升轉
+    降、伺服角反向。**擺臂水平（Z=0）在機構上沒有任何特殊性，不是力學死點**
+    （死點是擺臂與連桿共線），先前說「機構奇異點」「過中心機構會卡死」都不對。
+  - 修正：`solveVector()/solveSpherical()/computeMaxTilt()` 新增
+    `armBelowBase` 參數（預設 false，行為完全不變），為 true 時 `c?3` 取負根，
+    模型角可超過 90 度。`Config.h` 新增 `ALLOW_ARM_BELOW_BASE`（預設 false），
+    `main.cpp` 的 `armBelowBaseFor(h)` 在開關開啟且高度低於交界時套用。
+  - 實測延伸結果（host 計算，含開發板的 NVS offset 23/23/27）：模型角在
+    40~62 mm 之間隨高度下降嚴格遞增（88.04 → 118.45），跨越交界處無跳變；
+    伺服角 86.9 → 56.5 度，**全程在安全範圍 40~140 內，不需要重新安裝舵機**。
+  - `PLATFORM_MIN_HEIGHT_MM` 暫設 62.0（交界 60.46 再留約 2 度餘裕），開關關閉
+    時的安全值。開啟 `ALLOW_ARM_BELOW_BASE` 後可往下放寬到約 40。
+  - **開啟前必須確認擺臂往下擺不會撞到底板或結構件**，可用 `d` 指令手動轉到對應
+    的伺服角度（例如 40 mm 對應腳 1 約 56.5 度）檢查。
+  - 驗證（全部 host 端，未動馬達、未上傳）：`pio run -e esp32` 無警告；新增 11
+    項（預設關閉時模型角/computeMaxTilt 完全不變、負根＝對 90 度鏡射、負根在
+    40~交界之間嚴格遞增、跨交界整體單調且無跳變、伺服角全在安全範圍、對照組
+    確認不切負根會反轉）；既有 108 + 53 + 32 + 22 項無回歸。

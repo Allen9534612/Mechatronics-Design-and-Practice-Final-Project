@@ -81,6 +81,21 @@ static constexpr uint16_t SERVO_MAX_US = 2500;
 // 120 度，腳 3 在 240 度。
 static constexpr uint8_t SERVO_CHANNEL[3] = {0, 1, 2};
 
+// 伺服角度設定，三層由寬到窄：
+//   SERVO_HARD_*  伺服本身的物理極限，只用於脈寬換算的刻度（0~180 對應
+//                 SERVO_MIN_US~SERVO_MAX_US），不要當成可用範圍。
+//   SERVO_SAFE_*  **安全角度**。ServoMotor::setAngle() 的最終夾限，任何模組
+//                 （含 a / d 指令與未來新增的模式）送進來的角度都會被夾在這個
+//                 範圍，是保護機構的最後一道防線。
+//   SERVO_RANGE_* 運動學的工作範圍，填入 SERVO_CAL_DEFAULT 的 minDeg/maxDeg，
+//                 用於判斷姿態是否可達。必須落在安全角度之內。
+static constexpr float SERVO_HARD_MIN_DEG = 0.0f;
+static constexpr float SERVO_HARD_MAX_DEG = 180.0f;
+static constexpr float SERVO_SAFE_MIN_DEG = 40.0f;
+static constexpr float SERVO_SAFE_MAX_DEG = 140.0f;
+static constexpr float SERVO_RANGE_MIN_DEG = 40.0f;
+static constexpr float SERVO_RANGE_MAX_DEG = 140.0f;
+
 // 伺服校正：角度 = neutral + gain * (模型角 - 水平時的模型角) + offset，
 // 再限制在 [minDeg, maxDeg]。gain 為 +1 或 -1（馬達裝反時用 -1）。
 struct ServoCal {
@@ -94,9 +109,9 @@ struct ServoCal {
 // neutral 統一為 90，各馬達的差異以 offset 補償。gain 為 -1：伺服角度增加時
 // 連桿向下，與運動學的模型角方向相反，所以反轉輸出（不影響水平原點）。
 static constexpr ServoCal SERVO_CAL_DEFAULT[3] = {
-    {90.0f, -1.0f, 26.0f, 40.0f, 140.0f},
-    {90.0f, -1.0f, 22.5f, 40.0f, 140.0f},
-    {90.0f, -1.0f, 25.0f, 40.0f, 140.0f},
+    {90.0f, -1.0f, 26.0f, SERVO_RANGE_MIN_DEG, SERVO_RANGE_MAX_DEG},
+    {90.0f, -1.0f, 22.5f, SERVO_RANGE_MIN_DEG, SERVO_RANGE_MAX_DEG},
+    {90.0f, -1.0f, 25.0f, SERVO_RANGE_MIN_DEG, SERVO_RANGE_MAX_DEG},
 };
 
 // 平台機構尺寸，符號對應 PlatformKinematics。MAX_TILT_DEG 會再與運動學
@@ -107,6 +122,42 @@ static constexpr double PLATFORM_BOTTOM_ARM_MM = 45.0;   // l2
 static constexpr double PLATFORM_BASE_RADIUS_MM = 40.0;  // lb
 static constexpr float PLATFORM_DEFAULT_HEIGHT_MM = 82.6f;
 static constexpr float MAX_TILT_DEG = 15.0f;
+
+// 平台高度上下限：**這裡是唯一來源**，main.cpp 的 minUsableHeight()/
+// maxUsableHeight() 直接回傳這兩個值，不再被運動學或伺服掃描覆寫，GUI 也改為
+// 從 STAT 讀取而不是自己抄一份。h 越大＝平台越高。
+//
+// 設定超出機構實際能力時韌體不會阻擋，只會在開機時警告，因為那無法自動判斷
+// （Config 的機構尺寸可能與實體不符）。兩個已知的參考點：
+//   * 機構奇異點 sqrt(l1^2 - (lb + l2 - lp)^2)（目前尺寸下約 60.5 mm）：擺臂
+//     轉到水平，模型角達到 90 度的死點。低於它的高度在另一個解分支上，送出的
+//     伺服角度同時也對應上分支的某個高度，平台會停在上分支那一個。
+//   * 伺服角度：高度太高時水平姿態就會超出 SERVO_RANGE_*（目前約 96.9 mm）。
+// 擺臂末端能不能擺到基座平面以下。false（預設）時模型角上限為 90 度（擺臂水
+// 平），對應的平台高度約 sqrt(l1^2 - (lb + l2 - lp)^2)＝60.5 mm；低於它求解器
+// 會跳到鏡像解，模型角與伺服角反向，實際高度與指令不符（擺臂水平本身在機構上
+// 沒有特殊性，不是力學死點——死點是擺臂與連桿共線）。
+//
+// 設為 true 時取負根，擺臂可擺到水平線以下，模型角 > 90，平台能降到約 40 mm
+// （伺服角仍在安全範圍內，不需要重新安裝舵機）。**開啟前必須先確認擺臂往下擺
+// 時不會撞到底板或結構件**，可用 d 指令手動轉到對應角度檢查。
+static constexpr bool ALLOW_ARM_BELOW_BASE = true;
+
+// 高度下限。ALLOW_ARM_BELOW_BASE 為 false 時不要低於 62（60.5 是模型角 90 度
+// 的交界，留約 2 度餘裕）；設為 true 後可往下放寬。
+static constexpr float PLATFORM_MIN_HEIGHT_MM = 50.0f;
+// 96.9 是伺服安全角度允許的上限（100 時水平姿態就要 143.8 度，超過 140 會被
+// 夾限，平台會歪）。下限 50 的餘裕是 31 度，開了 ALLOW_ARM_BELOW_BASE 後最低
+// 可到約 30.3 mm。
+static constexpr float PLATFORM_MAX_HEIGHT_MM = 96.9f;
+static constexpr float HEIGHT_SCAN_STEP_MM = 0.1f;
+
+// 逆向運動學求最大傾角（computeMaxTilt）的二分搜尋範圍、收斂門檻、方向取樣
+// 間隔與安全餘裕。
+static constexpr float KINEMATICS_TILT_SEARCH_MAX_DEG = 25.0f;
+static constexpr float KINEMATICS_TILT_TOLERANCE_DEG = 0.05f;
+static constexpr int KINEMATICS_TILT_PHI_STEP_DEG = 10;
+static constexpr float KINEMATICS_TILT_MARGIN_DEG = 0.5f;
 
 // PID：輸入為球位置誤差 (mm)，輸出為平台傾角 (度)。
 // kp 單位為度/mm，ki 為度/(mm*s)，kd 為度/(mm/s)。
@@ -132,3 +183,12 @@ static constexpr float SWEEP_MIN_PERIOD_S = 0.5f;
 static constexpr float HOP_AMPLITUDE_MM = 5.0f;
 static constexpr float HOP_PERIOD_S = 0.5f;
 static constexpr float HOP_MIN_PERIOD_S = 0.2f;
+
+// 下 w / v 指令時檢查「整段軌跡是否都在伺服角度範圍內」的取樣間隔，以及被拒絕
+// 時回報「目前可用到多少」所用的掃描步進與上限（見 main.cpp 的
+// poseWithinServoRange / usableSweepTilt / usableHopAmplitude）。
+static constexpr float SWEEP_PHI_CHECK_STEP_DEG = 1.0f;
+static constexpr float RANGE_SCAN_TILT_STEP_DEG = 0.5f;
+static constexpr float RANGE_SCAN_PHI_STEP_DEG = 5.0f;
+static constexpr float RANGE_SCAN_AMP_STEP_MM = 0.5f;
+static constexpr float RANGE_SCAN_AMP_MAX_MM = 40.0f;

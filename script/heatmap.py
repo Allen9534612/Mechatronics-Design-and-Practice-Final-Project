@@ -33,17 +33,19 @@ import serial.tools.list_ports
 
 BAUD_RATE = 115200
 
-# 顯示用常數，需與 include/Config.h 一致。
-SERVO_MIN_DEG = 40.0
-SERVO_MAX_DEG = 140.0
+# 顯示用常數，需與 include/Config.h 的同名常數一致（韌體才是真正的權威，
+# 這裡只用來在送出指令前先擋掉明顯超出範圍的值）。
+# 以下四個只是「還沒收到 STAT 時」的後備值。韌體會在 STAT 末端回報實際的
+# 高度與伺服安全角度上下限（Config.h 是唯一來源），連上之後一律以 STAT 為準，
+# 不要在這裡改設定——改 include/Config.h。
+SERVO_MIN_DEG = 40.0  # 後備值；實際見 STAT 的 servo_min
+SERVO_MAX_DEG = 140.0  # 後備值；實際見 STAT 的 servo_max
 SERVO_CHANNELS = (0, 1, 2)
 SENSOR_ROTATION_DEG = 0.0
 SENSOR_FLIP_X = True
 SENSOR_FLIP_Y = False
-# 平台高度範圍（mm），由 PlatformKinematics 的 minHeight/maxHeight 算出，
-# 需與機構尺寸一致；超出範圍韌體會拒絕。
-HEIGHT_MIN_MM = 61.0
-HEIGHT_MAX_MM = 102.0
+HEIGHT_MIN_MM = 50.0  # 後備值；實際見 STAT 的 h_min
+HEIGHT_MAX_MM = 96.9  # 後備值；實際見 STAT 的 h_max
 SWEEP_MIN_PERIOD_S = 0.5  # 開迴路圓錐掃掠的週期下限
 HOP_MIN_PERIOD_S = 0.2  # 開迴路高度振盪的週期下限
 MIN_SPAN_MM = 40  # 色階最小跨距，避免畫面接近平坦時對比被放大成雜訊
@@ -73,6 +75,10 @@ STAT_FIELDS = [
     "out_alpha",
     "d_alpha",
     "int_limit",
+    "h_min",
+    "h_max",
+    "servo_min",
+    "servo_max",
 ]
 # 位置對應韌體的 enum Mode，新模式只能附加在末端。
 MODE_NAMES = ["PID 自動平衡", "指定傾角", "直接角度", "圓錐掃掠", "高度振盪"]
@@ -607,6 +613,10 @@ class DemoLink:
                                 self.out_alpha,
                                 self.d_alpha,
                                 self.int_limit,
+                                HEIGHT_MIN_MM,
+                                HEIGHT_MAX_MM,
+                                SERVO_MIN_DEG,
+                                SERVO_MAX_DEG,
                             ],
                         )
                     )
@@ -1116,6 +1126,14 @@ class App:
         self.s = 1.0
 
     # --- 設定值 ---
+    def limit(self, key, stat, fallback):
+        """回傳韌體回報的上下限；還沒收到 STAT 時用後備值。"""
+        if stat and key in stat:
+            v = stat[key]
+            if v is not None:
+                return float(v)
+        return fallback
+
     def val(self, key, stat):
         """回傳設定值；剛送出的值會暫時覆蓋，避免連點時讀到舊遙測。"""
         o = self.ov.get(key)
@@ -1325,7 +1343,9 @@ class App:
             )
             r.rrect(ix, yy + 19 * s, iiw, 4 * s, 2 * s, BG)
             if ang is not None:
-                f = (ang - SERVO_MIN_DEG) / (SERVO_MAX_DEG - SERVO_MIN_DEG)
+                slo = self.limit("servo_min", stat, SERVO_MIN_DEG)
+                shi = self.limit("servo_max", stat, SERVO_MAX_DEG)
+                f = (ang - slo) / (shi - slo) if shi > slo else 0.0
                 r.rrect(
                     ix,
                     yy + 19 * s,
@@ -1643,9 +1663,9 @@ class App:
             enabled=ok,
         )
         if dl and ok:
-            nh = min(
-                max(round(hv + dl * self.target_step, 1), HEIGHT_MIN_MM), HEIGHT_MAX_MM
-            )
+            lo = self.limit("h_min", stat, HEIGHT_MIN_MM)
+            hi = self.limit("h_max", stat, HEIGHT_MAX_MM)
+            nh = min(max(round(hv + dl * self.target_step, 1), lo), hi)
             if nh != hv:
                 self.set_ov("height", nh)
                 self.link.send(f"h {nh:.1f}")
@@ -1685,12 +1705,9 @@ class App:
             )
             if dl and ok:
                 new = list(cur)
-                new[i] = round(
-                    min(
-                        max(cur[i] + dl * self.servo_step, SERVO_MIN_DEG), SERVO_MAX_DEG
-                    ),
-                    1,
-                )
+                slo = self.limit("servo_min", stat, SERVO_MIN_DEG)
+                shi = self.limit("servo_max", stat, SERVO_MAX_DEG)
+                new[i] = round(min(max(cur[i] + dl * self.servo_step, slo), shi), 1)
                 if new[i] != cur[i]:
                     for k, v in enumerate(new):
                         self.set_ov(f"s{k + 1}", v)

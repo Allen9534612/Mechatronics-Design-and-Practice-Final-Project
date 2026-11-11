@@ -36,10 +36,15 @@ bool ServoMotor::setAngle(uint8_t channel, float angle) {
 
     if (isnan(angle) || isinf(angle)) return false;
 
-    angle = constrain(angle, 0.0f, 180.0f);
+    // 安全角度是最後一道防線：任何模組送進來的角度都夾在這裡（見 Config.h 的
+    // SERVO_SAFE_MIN/MAX_DEG）。
+    angle = constrain(angle, SERVO_SAFE_MIN_DEG, SERVO_SAFE_MAX_DEG);
 
-    float pulseUs = pulseMin[channel] +
-                    angle / 180.0f * (pulseMax[channel] - pulseMin[channel]);
+    // 脈寬刻度仍用伺服的物理量程（0~180 對應 SERVO_MIN_US~SERVO_MAX_US）。
+    float span = SERVO_HARD_MAX_DEG - SERVO_HARD_MIN_DEG;
+    float pulseUs =
+        pulseMin[channel] + (angle - SERVO_HARD_MIN_DEG) / span *
+                                (pulseMax[channel] - pulseMin[channel]);
 
     // 換算成 PCA9685 的 12-bit 計數值（50 Hz 時 1 tick ≈ 4.88 us）。
     float periodUs = 1000000.0f / pwmFrequency;

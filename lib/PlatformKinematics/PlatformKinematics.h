@@ -26,16 +26,22 @@ public:
 
     // 以法向量 (a, b, c) 與高度 h 求三顆伺服的模型角（度）。模型角 = 90 - 擺臂
     // 與水平外側方向的夾角。姿態超出機構可達範圍時回傳 false。
-    bool solveVector(double a, double b, double c, double h,
-                     float modelDeg[3]) const;
+    //
+    // armBelowBase 選擇擺臂末端 Z 的正負根：false（預設）限制擺臂末端不低於基座
+    // 平面，模型角上限為 90 度（擺臂水平）；true 取負根，讓擺臂可以擺到水平線
+    // 以下，模型角 > 90，平台因此能降得更低。擺臂水平（Z=0）在機構上沒有特殊性
+    // ——那不是力學死點（死點是擺臂與連桿共線）——但若不切換負根，低於該高度時
+    // 解會跳到鏡像解，模型角與伺服角會反向，實際高度與指令不符。
+    bool solveVector(double a, double b, double c, double h, float modelDeg[3],
+                     bool armBelowBase = false) const;
 
     // 以球座標指定姿態：thetaDeg 為傾角，phiDeg 為傾斜方向（平台往該方向那一
     // 側下傾）。
     bool solveSpherical(float thetaDeg, float phiDeg, float h,
-                        float modelDeg[3]) const;
+                        float modelDeg[3], bool armBelowBase = false) const;
 
     // 高度 h 下任何方向都解得出來的最大傾角（度），已扣除 0.5 度餘裕。
-    float computeMaxTilt(float h) const;
+    float computeMaxTilt(float h, bool armBelowBase = false) const;
 
 private:
     double lp, l1, l2, lb;
