@@ -1464,7 +1464,8 @@ class App:
         ly = gy0 + side + 12 * s
         steps = 60
         for i in range(steps):
-            dv = hi - (hi - lo) * i / (steps - 1)
+            # 由左到右遞增，與下方 lo / hi 標籤的位置一致。
+            dv = lo + (hi - lo) * i / (steps - 1)
             r.rect(
                 gx0 + side * i / steps,
                 ly,
