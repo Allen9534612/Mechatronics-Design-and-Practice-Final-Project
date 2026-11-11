@@ -40,6 +40,10 @@ static constexpr uint8_t TOF_SHARPENER_PERCENT = 0;
 // 區域有效性篩選：距離 (mm) 與 signal_per_spad。透過壓克力板量測時，板子的鏡面
 // 反射強度可高達數萬、球約數千，所以強度上限放寬，由估測器處理尖峰；距離下限
 // 要低於板子與球的實際距離（約 45 mm）。
+// 以下距離上下限是在 PLATFORM_DEFAULT_HEIGHT_MM 這個高度量測校正的；感測器固定
+// 在機構上方往下看，平台高度 (height) 數字增加＝平台降低＝感測器到平台的距離
+// 變遠，兩者近似 1:1（mm 對 mm），所以實際門檻會依目前高度與這個基準高度的差
+// 距平移，見 IRSensorArray::setHeight()。
 static constexpr int TOF_FILTER_MIN_DISTANCE = 10;
 static constexpr int TOF_FILTER_MAX_DISTANCE = 500;
 static constexpr int TOF_FILTER_MIN_STRENGTH = 1;

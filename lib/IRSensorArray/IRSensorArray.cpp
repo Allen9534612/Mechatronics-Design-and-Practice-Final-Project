@@ -67,6 +67,12 @@ void IRSensorArray::begin() {
     Serial.println("開始測量");
 }
 
+void IRSensorArray::setHeight(float heightMm) {
+    float delta = heightMm - PLATFORM_DEFAULT_HEIGHT_MM;
+    minDistanceMm = max(0.0f, TOF_FILTER_MIN_DISTANCE + delta);
+    maxDistanceMm = max(0.0f, TOF_FILTER_MAX_DISTANCE + delta);
+}
+
 bool IRSensorArray::readData(float grid_strength[MAX_GRID_SIZE][MAX_GRID_SIZE],
                              float grid_dist[MAX_GRID_SIZE][MAX_GRID_SIZE],
                              int& valid_zone_count) {
@@ -93,8 +99,7 @@ bool IRSensorArray::readData(float grid_strength[MAX_GRID_SIZE][MAX_GRID_SIZE],
                         uint32_t strength = results.signal_per_spad[index];
                         uint8_t status = results.target_status[index];
 
-                        if (dist >= TOF_FILTER_MIN_DISTANCE &&
-                            dist <= TOF_FILTER_MAX_DISTANCE &&
+                        if (dist >= minDistanceMm && dist <= maxDistanceMm &&
                             strength >= TOF_FILTER_MIN_STRENGTH &&
                             strength <= TOF_FILTER_MAX_STRENGTH &&
                             (status == 5 || status == 9)) {

@@ -503,6 +503,7 @@ void handleCommand(char* line) {
                 }
                 height = v[0];
                 maxTilt = newMax;
+                if (USE_IR_SENSOR) irSensor.setHeight(height);
                 if (mode == MODE_TILT)
                     applyTilt(min(tiltTheta, maxTilt), tiltPhi);
                 Serial.printf(">> 高度 %.1f mm，最大傾角 %.1f 度\n", height,
@@ -561,6 +562,7 @@ void setup() {
 
     if (USE_IR_SENSOR) {
         irSensor.begin();
+        irSensor.setHeight(height);
     }
 
     if (!kinematics.solveSpherical(0, 0, height, levelModel)) {
