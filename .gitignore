@@ -7,6 +7,7 @@ compile_commands.json
 __pycache__/
 *.pyc
 .ruff_cache
+.mypy_cache
 .claude/settings.local.json
 *.lnk
 script/heatmap_crash.log
