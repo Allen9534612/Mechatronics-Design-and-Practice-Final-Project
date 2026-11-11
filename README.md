@@ -59,5 +59,6 @@
   Get-ChildItem -Path "src", "lib", "include" -Include *.cpp, *.c, *.h -Recurse | ForEach-Object { clang-format -i -style=file $_.FullName }
   ```
 
+- **clangd 失效時，到 plaformio - project tasks - esp32 - advanced - compilation database 生成路徑快取**
 - 在檔案按下 `Shift + Alt + F` 亦可排版。
 - 鼠標懸浮在 Warnings 時，按下 `Ctrl + .` 可檢視 Linter 提供的快速修正選項。
