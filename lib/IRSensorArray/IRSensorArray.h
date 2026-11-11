@@ -19,6 +19,10 @@ public:
 
     void changeResolution(int new_size);
 
+    // 依目前平台高度 (mm) 平移距離篩選的上下限，見 Config.h 的
+    // TOF_FILTER_MIN/MAX_DISTANCE 註解。
+    void setHeight(float heightMm);
+
     // 有新畫面時回傳 true，並填入各區域的訊號強度與距離 (mm)；沒有通過篩選
     // 的區域為 0。
     bool readData(float grid_strength[MAX_GRID_SIZE][MAX_GRID_SIZE],
@@ -28,6 +32,8 @@ public:
 private:
     VL53L7CX sensor;
     VL53L7CX_ResultsData results;
+    float minDistanceMm = TOF_FILTER_MIN_DISTANCE;
+    float maxDistanceMm = TOF_FILTER_MAX_DISTANCE;
     void halt(const char* msg, int status);
 };
 
