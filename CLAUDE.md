@@ -10,6 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 排版：C/C++ 用 `clang-format -i -style=file`（src/lib/include），Python 用 `ruff format script/` 與 `ruff check --fix script/`（指令見 README）；改完程式後先排版再 commit。
 - commit message 使用英文且盡量簡要。
 - 每次執行 git 操作前先問過使用者，包含 commit 及 worktree、branch 建立。
+- **預設直接在 local main 上改動，不要自己建立 worktree/branch**：即使執行環境
+  （例如背景 job 的 harness）提示或要求先建立 worktree 以求隔離，這份
+  CLAUDE.md 的規則優先，一律先問過使用者再建立；沒問之前就直接編輯 main 的
+  工作目錄（2026-11-18：曾在背景 job 裡未問自動建立過一次 worktree，事後依
+  使用者指示把變更複製回 main 並刪除該 worktree，之後改成這條規則）。
 - 本地 worktree 使用完刪除。
 
 ## Project overview
@@ -91,6 +96,16 @@ This is a PlatformIO project (`platformio.ini` at the repo root). Use the Platfo
   `poseWithinServoRange()` 檢查整段軌跡都不會被伺服角度上下限夾限。
   `applyTilt()` 會把實際送出的高度交給 `IRSensorArray::setHeight()`，所以振盪
   期間 ToF 的距離篩選窗會跟著平台走，離開振盪時自動還原。
+- 閉迴路球繞圈（`q 半徑 週期`，需 `USE_IR_SENSOR`）：不是新控制器，沿用
+  `MODE_BALL` 的 `BalanceController`，只是把目標點從固定的 `(targetX, targetY)`
+  換成繞著它轉動的函式（圓心仍是 `targetX`/`targetY`，可用 `g` 指令隨時移動，
+  即使繞圈中也可以；`q` 指令不會改寫這兩個全域變數，只在 `loop()` 裡算出當下
+  應該餵給 PID 的瞬時目標點，語意與 `MODE_HOP` 讓 `height` 維持基準值相同）。
+  `BalanceController::update()` 的微分項取球的「量測值」變化、不是目標點的變
+  化，所以移動目標點不會有微分項暴衝；延遲只來自既有的 `CONTROL_PERIOD_MS`
+  控制迴圈，沒有額外引入大延遲。半徑上限與週期下限（`ORBIT_MAX_RADIUS_MM` /
+  `ORBIT_MIN_PERIOD_S`）都只是保守的起始猜測，沒有機構上的限制，需要上機測試
+  調整。
 - `test/raw.cpp`：獨立的感測器原始資料測試程式（不屬於主 build）。
 
 ## 開發歷程
@@ -336,3 +351,28 @@ This is a PlatformIO project (`platformio.ini` at the repo root). Use the Platfo
     30.3 mm。
   - `PLATFORM_MIN/MAX_HEIGHT_MM` 目前為 20 / 100，`Config.h` 的註解已改成記錄這
     三層的實際數字（原註解還停在 50 / 96.9 的舊值）。
+- 2026-11-18：實作閉迴路球繞圈（`q` 指令），接續 2026-11-11 那則「繞圈的閉迴路
+  版本是現有 PID + 會動的目標點」的架構決定。新增 `MODE_ORBIT`（附加在
+  `enum Mode` 最後），只在 `loop()` 最後 PID 那一段多算一個會隨時間繞著
+  `(targetX, targetY)` 轉的瞬時目標點（`targetX += radius*cos(ang)` 等），餵給
+  跟 `MODE_BALL` 完全同一份 `BalanceController::update()`，不是新控制器；圓心
+  不會被 `q` 改寫，維持跟 `MODE_HOP` 一樣「基準值穩定、瞬時值只在算 PID 時用」
+  的設計。`Config.h` 新增 `ORBIT_RADIUS_MM/PERIOD_S/MIN_PERIOD_S/MAX_RADIUS_MM`
+  （皆為保守起始猜測，無機構限制）；`q` 指令需 `USE_IR_SENSOR`（手動模式沒有
+  連續球位置回饋，繞圈沒有意義）。
+  - 讀過 `BalanceController.cpp` 確認微分項取的是球的「量測值」變化
+    （`lastX/lastY`），不是目標點的變化，所以移動目標點不會造成微分項暴衝；
+    控制週期沒變，延遲只來自既有的 `CONTROL_PERIOD_MS`，沒有引入新的大延遲
+    ——這是選這個實作方式（沿用 PID）而不是另外寫一個軌跡追蹤控制器的理由。
+  - `modeName()`/`printStatus()`/`printHelp()` 補上 `MODE_ORBIT`；
+    `script/heatmap.py` 的 `MODE_NAMES` 補「球繞圈」、`DemoLink` 新增 `q` 指令
+    解析與 `mode == 5` 的物理模擬（沿用 `mode == 0` 的 PID 邏輯，目標點改成繞
+    `(tx, ty)` 轉動），新增 `ORBIT_MIN_PERIOD_S`/`ORBIT_MAX_RADIUS_MM` 常數。
+  - 驗證：`pio run -e esp32` 成功無警告；`ruff format`/`ruff check`/`mypy`
+    通過；另外直接匯入 `heatmap.DemoLink`（不碰 pygame 顯示，因為這台機器沒有
+    X/Xvfb 跑不了 OpenGL 視窗）寫了一份獨立腳本驗證：繞圈目標點到圓心距離恆為
+    半徑、四個時間點位置互不相同（真的在繞）、半徑超過上限或週期低於下限會被
+    拒絕、合法參數會進入 `mode == 5`。測試腳本放在暫存目錄，未納入 repo。
+  - **尚未實機驗證**：這是全新的閉迴路模式，半徑/週期的預設與上下限都只是起
+    始猜測；第一次上傳請先用小半徑、長週期（例如 `q 10 3`）確認球真的會沿著
+    PID 給的軌跡繞圈、再加大。
