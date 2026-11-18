@@ -199,3 +199,14 @@ static constexpr float RANGE_SCAN_TILT_STEP_DEG = 0.5f;
 static constexpr float RANGE_SCAN_PHI_STEP_DEG = 5.0f;
 static constexpr float RANGE_SCAN_AMP_STEP_MM = 0.5f;
 static constexpr float RANGE_SCAN_AMP_MAX_MM = 40.0f;
+
+// 閉迴路球繞圈（q 指令，需 USE_IR_SENSOR 才有連續的球位置回饋）：不是新控制
+// 器，沿用現有的 BalanceController，只是把目標點換成繞 (targetX, targetY)
+// 轉動的函式——微分項取的是球的量測值變化（BalanceController::update() 本來
+// 就這樣寫），移動目標點不會造成微分項暴衝，所以延遲只來自原本就有的控制迴圈
+// （CONTROL_PERIOD_MS），沒有額外引入大延遲。下面兩個是保守的起始猜測，沒有
+// 機構上的限制，需要上機測試再調整。
+static constexpr float ORBIT_RADIUS_MM = 20.0f;
+static constexpr float ORBIT_PERIOD_S = 3.0f;
+static constexpr float ORBIT_MIN_PERIOD_S = 2.0f;
+static constexpr float ORBIT_MAX_RADIUS_MM = 40.0f;

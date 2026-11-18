@@ -19,7 +19,8 @@ enum Mode {
     MODE_TILT,   // 指定傾角
     MODE_RAW,    // 直接指定伺服角度
     MODE_SWEEP,  // 開迴路圓錐掃掠（不讀球位置）
-    MODE_HOP     // 開迴路高度振盪（不讀球位置）
+    MODE_HOP,    // 開迴路高度振盪（不讀球位置）
+    MODE_ORBIT   // 閉迴路球繞圈：PID + 會繞著目標點轉動的目標點
 };
 
 // 球位置，座標單位為 mm。
@@ -55,6 +56,12 @@ float sweepPeriodS = SWEEP_PERIOD_S;
 float hopAmplitude = HOP_AMPLITUDE_MM;
 float hopPeriodS = HOP_PERIOD_S;
 uint32_t sweepStartMs = 0;
+
+// 閉迴路球繞圈（q 指令）的參數與起始時刻；圓心就是 targetX/targetY，可用
+// g 指令隨時移動（即使繞圈中也可以）。
+float orbitRadius = ORBIT_RADIUS_MM;
+float orbitPeriodS = ORBIT_PERIOD_S;
+uint32_t orbitStartMs = 0;
 
 BallReading manualBall = {false, 0.0f, 0.0f};
 BallReading irBall = {false, 0.0f, 0.0f};
@@ -256,6 +263,8 @@ const char* modeName() {
             return "圓錐掃掠";
         case MODE_HOP:
             return "高度振盪";
+        case MODE_ORBIT:
+            return "球繞圈";
     }
     return "?";
 }
@@ -278,6 +287,9 @@ void printHelp() {
     Serial.println(
         "  v 振幅 週期   開迴路高度振盪（不讀球位置），平台上下動，例：v 5 "
         "0.5");
+    Serial.println(
+        "  q 半徑 週期   閉迴路球繞圈：PID 的目標點繞目前目標點轉一圈，例：q "
+        "20 3");
     Serial.println(
         "  a a1 a2 a3   設定三顆伺服角度（會加上各自 offset，a 90 90 90 = "
         "水平）");
@@ -309,6 +321,9 @@ void printStatus() {
     if (mode == MODE_HOP)
         Serial.printf("振盪: %.1f ± %.1f mm，週期 %.2f 秒\n", height,
                       hopAmplitude, hopPeriodS);
+    if (mode == MODE_ORBIT)
+        Serial.printf("繞圈: 圓心 (%.1f, %.1f)，半徑 %.1f mm，週期 %.2f 秒\n",
+                      targetX, targetY, orbitRadius, orbitPeriodS);
     Serial.printf("伺服驅動: %s\n", servoReady ? "已連線" : "未偵測到");
     Serial.printf("高度: %.1f mm  最大傾角: %.1f 度\n", height, maxTilt);
     Serial.printf("PID: kp=%.4f ki=%.4f kd=%.4f\n", pid.kp, pid.ki, pid.kd);
@@ -577,6 +592,40 @@ void handleCommand(char* line) {
                     height, hopAmplitude, hopPeriodS);
             } else
                 Serial.println(">> 格式：v 振幅 週期（秒）");
+            break;
+
+        case 'q':  // 閉迴路球繞圈：沿用 PID，目標點繞目前目標點轉動。
+            if (!USE_IR_SENSOR) {
+                Serial.println(
+                    ">> 手動模式沒有連續的球位置回饋，q 指令只在紅外線模式下"
+                    "有意義");
+                break;
+            }
+            if (parseNumbers(tok, n, 1, 2, v)) {
+                if (v[0] <= 0 || v[0] > ORBIT_MAX_RADIUS_MM) {
+                    Serial.printf(">> 錯誤：半徑需在 0 ~ %.1f mm 之間\n",
+                                  ORBIT_MAX_RADIUS_MM);
+                    break;
+                }
+                if (v[1] < ORBIT_MIN_PERIOD_S) {
+                    Serial.printf(
+                        ">> 錯誤：週期需 >= %.2f 秒（PID 可能跟不上，這只是"
+                        "保守的起始值）\n",
+                        ORBIT_MIN_PERIOD_S);
+                    break;
+                }
+                mode = MODE_ORBIT;
+                manualBall.present = false;
+                orbitRadius = v[0];
+                orbitPeriodS = v[1];
+                orbitStartMs = millis();
+                pid.reset();
+                Serial.printf(
+                    ">> 閉迴路繞圈：圓心 (%.1f, %.1f)，半徑 %.1f mm，每 %.2f "
+                    "秒一圈（l 回水平、g 可移動圓心）\n",
+                    targetX, targetY, orbitRadius, orbitPeriodS);
+            } else
+                Serial.println(">> 格式：q 半徑 週期（秒）");
             break;
 
         case 'a':
@@ -891,9 +940,21 @@ void loop() {
     }
 
     // 手動模式與 t / l / a 之後都不跑 PID，輸入 r 恢復。
-    if (!USE_IR_SENSOR || mode != MODE_BALL) return;
+    if (!USE_IR_SENSOR || (mode != MODE_BALL && mode != MODE_ORBIT)) return;
 
-    pid.update(present, px, py, targetX, targetY, dt, maxTilt, tiltTheta,
-               tiltPhi);
+    // MODE_ORBIT 跟 MODE_BALL 共用同一個 PID：目標點只是從固定的
+    // (targetX, targetY) 換成繞著它轉動的點，圓心仍可用 g 指令移動。
+    // BalanceController 的微分項取球的量測值變化（不是目標點變化），所以移動
+    // 目標點不會造成微分項暴衝；控制週期沒變，延遲只來自原本就有的
+    // CONTROL_PERIOD_MS，沒有額外引入大延遲。
+    float tx = targetX, ty = targetY;
+    if (mode == MODE_ORBIT) {
+        float t = (now - orbitStartMs) / 1000.0f;
+        float ang = TWO_PI * t / orbitPeriodS;
+        tx += orbitRadius * cosf(ang);
+        ty += orbitRadius * sinf(ang);
+    }
+
+    pid.update(present, px, py, tx, ty, dt, maxTilt, tiltTheta, tiltPhi);
     applyTilt(tiltTheta, tiltPhi);
 }
