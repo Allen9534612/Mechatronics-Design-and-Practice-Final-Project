@@ -9,6 +9,11 @@
 static constexpr long SERIAL_BAUD = 115200;
 static constexpr uint32_t CONTROL_PERIOD_MS = 20;
 static constexpr uint32_t STAT_PERIOD_MS = 100;
+// DATA（距離矩陣）的最小輸出間隔。球位置估測仍以感測器全速執行，這裡只節流
+// 「送給 GUI 畫熱圖」的部分：4x4 60Hz 時一行約 133 bytes、8x8 約 470 bytes，
+// 超過 ESP32 的 TX 緩衝區就會阻塞 loop()，實測把控制週期從 20ms 拖到 31ms
+// （8x8 更到 64ms）。50ms（20Hz）對人眼看熱圖已經足夠。0 表示每幀都送。
+static constexpr uint32_t DATA_PERIOD_MS = 50;
 static constexpr bool USE_IR_SENSOR = true;
 
 // 開機後的預設姿態是水平（使用已儲存的原點），不會自動開始平衡；要平衡時
@@ -19,7 +24,12 @@ static constexpr bool AUTO_BALANCE_AT_BOOT = false;
 // 與傳輸時間影響感測器。
 static constexpr uint8_t TOF_I2C_SDA_PIN = 22;
 static constexpr uint8_t TOF_I2C_SCL_PIN = 21;
-static constexpr uint32_t TOF_I2C_FREQ_HZ = 400000;
+// 每幀要把整個結果緩衝區搬回來，400kHz 下實測 4x4 要 14.4ms、8x8 要 38.4ms，
+// 會直接阻塞 loop()（控制週期因此從 20ms 變成 29/65ms）。2026-11-18 用這組接線
+// 與拉電阻做過二分搜尋：400k/500k/700k/850k 都能在開機時找到裝置，1MHz 找不到
+// （裝置斷線中止，900k~980k 尚未測到）；850k 是目前確認可用的最高值，未重新
+// 量過 850k 下實際的讀取耗時，上傳後請先確認開機訊息為「成功找到裝置」。
+static constexpr uint32_t TOF_I2C_FREQ_HZ = 850000;
 static constexpr uint8_t SERVO_I2C_SDA_PIN = 18;
 static constexpr uint8_t SERVO_I2C_SCL_PIN = 19;
 static constexpr uint32_t SERVO_I2C_FREQ_HZ = 400000;
@@ -206,6 +216,39 @@ static constexpr float RANGE_SCAN_AMP_MAX_MM = 40.0f;
 // 就這樣寫），移動目標點不會造成微分項暴衝，所以延遲只來自原本就有的控制迴圈
 // （CONTROL_PERIOD_MS），沒有額外引入大延遲。下面兩個是保守的起始猜測，沒有
 // 機構上的限制，需要上機測試再調整。
+// 閉迴路彈跳（j 指令）。垂直是正弦振盪——實測開迴路的 v 指令就能讓球自己鎖
+// 相（彈跳球映射的週期-1 吸引子），所以回授不去抓個別撞擊時機（那會被
+// ToF 60Hz + 50Hz PWM 的 ±13ms 抖動卡死），只做兩件事：
+//   水平：沿用既有 PID 把球留在盤上（與 MODE_BALL 相同）
+//   垂直：量飛行時間推估彈跳高度，緩慢修正振幅
+static constexpr float BOUNCE_AMPLITUDE_MM = 14.0f;  // 初始振幅
+static constexpr float BOUNCE_PERIOD_S = 0.3f;
+static constexpr float BOUNCE_MIN_PERIOD_S = 0.2f;
+static constexpr float BOUNCE_AMP_MIN_MM = 4.0f;
+// 19 而非 20：預設高度 82.6 下 20mm 的水平姿態已超出伺服角度範圍。注意振幅
+// 越大、彈跳中能用的傾角越小（82.6mm 時振幅 14 只剩 4.5 度），要邊彈邊控水平
+// 建議先把高度降到 70 左右，那裡振幅 14 仍有滿檔 15 度。
+static constexpr float BOUNCE_AMP_MAX_MM = 19.0f;
+// mm 振幅 / mm 高度誤差。量測噪聲約 ±4.5mm（飛行時間兩端各 ±1 幀），增益要夠
+// 低才不會把噪聲灌進振幅：0.05 收斂約 47 次撞擊（14 秒）、穩態 ±1.6mm，0.5 會
+// 放大成 ±18mm。設 0 則只量測與回報、不調整振幅。
+static constexpr float BOUNCE_AMP_GAIN = 0.05f;
+// 球離開偵測超過這個時間才算一次飛行（濾掉單幀掉幀）。
+// 主動鎖相。球靠近板面才偵測得到，所以「有球」的區間包住撞擊，取中點當撞擊
+// 時刻（誤差約 ±1 幀）。單次量測很粗，靠低增益累積多次撞擊平均掉。
+//
+// 相位定義：h = height + A*sin(2*pi*phi)，速度正比 cos(2*pi*phi)。
+// 穩定需要「上行且減速中」= phi 落在 0~0.25：球早到 -> 平台速度更大 -> 彈更高
+// -> 下次更晚到，形成自我修正。0.125 是上行中段、已開始減速。
+// BOUNCE_PHASE_GAIN 設 0 則只量測與回報，不主動修正（靠物理自然鎖相）。
+static constexpr float BOUNCE_PHASE_TARGET = 0.125f;
+static constexpr float BOUNCE_PHASE_GAIN = 0.15f;
+// 單次修正的頻率偏移上限（相對值）。限制它才不會在誤差大時把正弦拉得太快。
+static constexpr float BOUNCE_RATE_LIMIT = 0.30f;
+
+static constexpr uint32_t BOUNCE_MIN_FLIGHT_MS = 40;
+static constexpr uint32_t BOUNCE_MAX_FLIGHT_MS = 1200;
+
 static constexpr float ORBIT_RADIUS_MM = 20.0f;
 static constexpr float ORBIT_PERIOD_S = 3.0f;
 static constexpr float ORBIT_MIN_PERIOD_S = 2.0f;

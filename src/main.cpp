@@ -20,7 +20,8 @@ enum Mode {
     MODE_RAW,    // 直接指定伺服角度
     MODE_SWEEP,  // 開迴路圓錐掃掠（不讀球位置）
     MODE_HOP,    // 開迴路高度振盪（不讀球位置）
-    MODE_ORBIT   // 閉迴路球繞圈：PID + 會繞著目標點轉動的目標點
+    MODE_ORBIT,  // 閉迴路球繞圈：PID + 會繞著目標點轉動的目標點
+    MODE_BOUNCE  // 閉迴路彈跳：垂直正弦（自己鎖相）+ 水平 PID
 };
 
 // 球位置，座標單位為 mm。
@@ -63,11 +64,46 @@ float orbitRadius = ORBIT_RADIUS_MM;
 float orbitPeriodS = ORBIT_PERIOD_S;
 uint32_t orbitStartMs = 0;
 
+// 閉迴路彈跳。彈跳高度由球「偵測到→消失→再偵測到」的間隔推估：球飛高後角
+// 尺寸變小、訊號變弱會偵測不到，所以不追蹤頂點，改量飛行時間（h = g*t^2/8）。
+// bounceTargetMm 為 0 表示固定振幅、不做垂直調整。
+float bounceAmp = BOUNCE_AMPLITUDE_MM;
+float bouncePeriodS = BOUNCE_PERIOD_S;
+float bounceTargetMm = 0.0f;
+uint32_t bounceLostMs = 0;    // 球最後一次消失的時刻
+float bounceFlightS = 0.0f;   // 最近一次量到的飛行時間
+float bounceHeightMm = 0.0f;  // 由飛行時間推估的彈跳高度
+bool bounceWasPresent = false;
+uint32_t bounceFoundMs = 0;  // 球這一輪開始被偵測到的時刻
+float bouncePhase = -1.0f;   // 最近一次量到的撞擊相位（0~1，-1 為尚未量到）
+// 相位用累加器而不是 (now - start)/T：鎖相修正的是「頻率」，累加器才能讓高度
+// 指令保持連續。直接平移時間原點會讓 sin 跳變數 mm，正好在球要落下時擾動平台。
+float bouncePhaseAcc = 0.0f;    // 0~1
+float bouncePhaseFound = 0.0f;  // 球被偵測到當下的相位
+float bounceRateCorr = 0.0f;    // 相對頻率偏移，每次撞擊重設
+// bounceMaxTilt() 要掃描傾角 x 方向 x 三個高度，振幅 14 時約 2000 次逆運動學
+// （ESP32 上數 ms），絕對不能放在控制迴圈裡每週期算。快取起來，只有振幅真的
+// 改變時才重算。
+float bounceTiltCap = 0.0f;
+float bounceCapAmp = -1.0f;  // 快取對應的振幅
+// 上一次真的餵給 PID 的時刻。飛行中偵測不到球，PID 不更新，所以再次更新時
+// 必須傳「真正經過的時間」——沿用控制週期會讓微分被放大成飛行時間/20ms 倍。
+uint32_t bouncePidMs = 0;
+
 BallReading manualBall = {false, 0.0f, 0.0f};
 BallReading irBall = {false, 0.0f, 0.0f};
 bool servoReady = false;  // PCA9685 是否偵測到。
 Preferences prefs;
 float lastDistMm = 0.0f;  // 供 STAT 回報。
+// 控制週期的實測值。超過 CONTROL_PERIOD_MS 代表迴圈裡有東西太慢（例如把逆
+// 運動學掃描放進迴圈），正弦類模式的取樣會變粗、時序會跑掉。
+uint32_t dataPeriodMs = DATA_PERIOD_MS;  // m 指令可調整
+uint32_t loopMaxMs = 0;
+// 感測器讀取與 DATA 輸出各自的耗時，用來分辨控制週期被誰拖慢。
+float sensorAvgMs = 0.0f;
+uint32_t sensorMaxMs = 0;
+float dataAvgMs = 0.0f;
+float loopAvgMs = 0.0f;
 int lastValidZones = 0;
 
 bool readBallPosition(BallReading& ball) {
@@ -175,6 +211,33 @@ float usableSweepTilt() {
     return usable;
 }
 
+// 振幅 A 的彈跳中，全方向且高度上下極限都不夾限的最大傾角。彈跳時 PID 的傾角
+// 會疊在振盪的高度上，只用 maxTilt 會讓極限附近被靜默夾限。
+float bounceMaxTilt(float amp) {
+    float best = 0.0f;
+    for (float t = RANGE_SCAN_TILT_STEP_DEG; t <= maxTilt;
+         t += RANGE_SCAN_TILT_STEP_DEG) {
+        bool ok = true;
+        for (float phi = 0.0f; phi < 360.0f && ok;
+             phi += RANGE_SCAN_PHI_STEP_DEG) {
+            if (!poseWithinServoRange(t, phi, height - amp) ||
+                !poseWithinServoRange(t, phi, height) ||
+                !poseWithinServoRange(t, phi, height + amp))
+                ok = false;
+        }
+        if (!ok) break;
+        best = t;
+    }
+    return best;
+}
+
+// 振幅變動超過半個掃描步進才重算傾角上限（見 bounceTiltCap 的註解）。
+void updateBounceTiltCap(float amp) {
+    if (fabsf(amp - bounceCapAmp) < 0.5f) return;
+    bounceCapAmp = amp;
+    bounceTiltCap = bounceMaxTilt(amp);
+}
+
 // 以目前高度為基準，上下都不會夾限的最大振幅。
 float usableHopAmplitude() {
     float usable = 0.0f;
@@ -190,8 +253,13 @@ float usableHopAmplitude() {
 
 void writeServos(const float servoDeg[3]) {
     for (int i = 0; i < 3; i++) {
-        motors.setAngle(SERVO_CHANNEL[i], servoDeg[i]);
-        lastServo[i] = servoDeg[i];
+        // ServoMotor::setAngle() 內部會夾到
+        // SERVO_SAFE_*，這裡同樣夾一次再記錄， 否則 lastServo（STAT 與 GUI
+        // 的來源）會顯示實際上沒送出的角度。
+        float a =
+            constrain(servoDeg[i], SERVO_SAFE_MIN_DEG, SERVO_SAFE_MAX_DEG);
+        motors.setAngle(SERVO_CHANNEL[i], a);
+        lastServo[i] = a;
     }
 }
 
@@ -263,6 +331,8 @@ const char* modeName() {
             return "圓錐掃掠";
         case MODE_HOP:
             return "高度振盪";
+        case MODE_BOUNCE:
+            return "閉迴路彈跳";
         case MODE_ORBIT:
             return "球繞圈";
     }
@@ -281,6 +351,8 @@ void printHelp() {
     Serial.println("  g x y        設定目標點（mm，盤面中心為原點）");
     Serial.println("  t 傾角 方向   直接傾斜：往「方向」那側往下傾，例：t 5 0");
     Serial.println("  l            回水平");
+    Serial.println(
+        "  j 振幅 週期 [目標]   閉迴路彈跳：垂直正弦＋水平 PID，例：j 14 0.3");
     Serial.println(
         "  w 傾角 週期   開迴路圓錐掃掠（不讀球位置），傾斜方向繞一圈，例：w 5 "
         "2");
@@ -307,6 +379,8 @@ void printHelp() {
         "0~1，上限單位度）");
     Serial.println("  h 高度        設定平台高度");
     Serial.println("  4 / 8        切換感測器解析度");
+    Serial.println(
+        "  m 毫秒        DATA 熱圖的最小輸出間隔（0=每幀），例：m 50");
     Serial.println("  s            顯示目前狀態");
     Serial.println("  ?            顯示這份說明");
     Serial.println("==========================================");
@@ -321,9 +395,32 @@ void printStatus() {
     if (mode == MODE_HOP)
         Serial.printf("振盪: %.1f ± %.1f mm，週期 %.2f 秒\n", height,
                       hopAmplitude, hopPeriodS);
+    if (mode == MODE_BOUNCE) {
+        Serial.printf(
+            "彈跳: 振幅 %.1f mm 週期 %.2f 秒  目標 %.0f mm  量到 %.0f "
+            "mm（飛行 %.0f ms）\n",
+            bounceAmp, bouncePeriodS, bounceTargetMm, bounceHeightMm,
+            bounceFlightS * 1000.0f);
+        if (bouncePhase >= 0.0f)
+            Serial.printf(
+                "鎖相: 撞擊相位 %.3f（目標 %.3f，誤差 %+.3f）傾角上限 %.1f "
+                "度\n",
+                bouncePhase, BOUNCE_PHASE_TARGET,
+                bouncePhase - BOUNCE_PHASE_TARGET, bounceTiltCap);
+        else
+            Serial.println("鎖相: 尚未量到撞擊相位");
+    }
     if (mode == MODE_ORBIT)
         Serial.printf("繞圈: 圓心 (%.1f, %.1f)，半徑 %.1f mm，週期 %.2f 秒\n",
                       targetX, targetY, orbitRadius, orbitPeriodS);
+    Serial.printf("控制週期: 平均 %.1f ms 最大 %u ms（目標 %d ms）%s\n",
+                  loopAvgMs, loopMaxMs, CONTROL_PERIOD_MS,
+                  loopMaxMs > 2 * CONTROL_PERIOD_MS ? "  <-- 偏慢" : "");
+    Serial.printf(
+        "  其中 感測器讀取 平均 %.1f ms 最大 %u ms；DATA 輸出 %.1f ms\n",
+        sensorAvgMs, sensorMaxMs, dataAvgMs);
+    loopMaxMs = 0;  // 讀過就重設，方便觀察某個動作造成的尖峰。
+    sensorMaxMs = 0;
     Serial.printf("伺服驅動: %s\n", servoReady ? "已連線" : "未偵測到");
     Serial.printf("高度: %.1f mm  最大傾角: %.1f 度\n", height, maxTilt);
     Serial.printf("PID: kp=%.4f ki=%.4f kd=%.4f\n", pid.kp, pid.ki, pid.kd);
@@ -628,6 +725,74 @@ void handleCommand(char* line) {
                 Serial.println(">> 格式：q 半徑 週期（秒）");
             break;
 
+        case 'j':  // 閉迴路彈跳：垂直正弦 + 水平 PID。
+            if (parseNumbers(tok, n, 1, 2, v)) {
+                if (v[0] < BOUNCE_AMP_MIN_MM || v[0] > BOUNCE_AMP_MAX_MM) {
+                    Serial.printf(">> 錯誤：振幅需在 %.0f ~ %.0f mm 之間\n",
+                                  BOUNCE_AMP_MIN_MM, BOUNCE_AMP_MAX_MM);
+                    break;
+                }
+                if (v[1] < BOUNCE_MIN_PERIOD_S) {
+                    Serial.printf(">> 錯誤：週期需 >= %.2f 秒\n",
+                                  BOUNCE_MIN_PERIOD_S);
+                    break;
+                }
+                if (!poseWithinServoRange(0.0f, 0.0f, height - v[0]) ||
+                    !poseWithinServoRange(0.0f, 0.0f, height + v[0])) {
+                    Serial.printf(
+                        ">> 錯誤：%.1f ± %.1f mm 超出伺服角度範圍（約 ± %.1f "
+                        "mm 以內可用）\n",
+                        height, v[0], usableHopAmplitude());
+                    break;
+                }
+                float tgt = 0.0f;
+                if (n >= 4 && !parseNumber(tok[3], tgt)) {
+                    Serial.println(">> 格式：j 振幅 週期 [目標彈跳高度]");
+                    break;
+                }
+                if (!USE_IR_SENSOR) {
+                    Serial.println(
+                        ">> 警告：USE_IR_SENSOR 為 false，水平 PID 不會作用");
+                }
+                float bt = bounceMaxTilt(v[0]);
+                if (bt <= 0.0f) {
+                    Serial.printf(
+                        ">> 錯誤：振幅 %.1f mm 時無法同時傾斜，水平 PID 會失"
+                        "效。請降低振幅或把高度調低（例如 h 70）\n",
+                        v[0]);
+                    break;
+                }
+                mode = MODE_BOUNCE;
+                bounceAmp = v[0];
+                bounceCapAmp = v[0];
+                bounceTiltCap = bt;
+                bouncePeriodS = v[1];
+                bounceTargetMm = max(tgt, 0.0f);
+                bounceWasPresent = false;
+                bounceFoundMs = 0;
+                bounceLostMs = 0;
+                bouncePhase = -1.0f;
+                bouncePhaseAcc = 0.0f;
+                bouncePhaseFound = 0.0f;
+                bounceRateCorr = 0.0f;
+                bouncePidMs = 0;
+                bounceFlightS = 0.0f;
+                bounceHeightMm = 0.0f;
+                pid.reset();
+                Serial.printf(
+                    ">> 閉迴路彈跳：%.1f ± %.1f mm，週期 %.2f 秒，水平 PID "
+                    "維持在 (%.1f, %.1f)%s（l 停止）\n",
+                    height, bounceAmp, bouncePeriodS, targetX, targetY,
+                    (bounceTargetMm > 0 && BOUNCE_AMP_GAIN > 0)
+                        ? "，振幅會依量到的彈跳高度調整"
+                    : bounceTargetMm > 0
+                        ? "，目標高度只會量測與回報（BOUNCE_AMP_GAIN 為 0）"
+                        : "，固定振幅");
+                Serial.printf(">> 此振幅下水平 PID 可用傾角 %.1f 度\n", bt);
+            } else
+                Serial.println(">> 格式：j 振幅 週期 [目標彈跳高度]");
+            break;
+
         case 'a':
             if (parseNumbers(tok, n, 1, 3, v)) {
                 bool outOfRange = false;
@@ -786,6 +951,20 @@ void handleCommand(char* line) {
                 Serial.println(">> 格式：h 高度");
             break;
 
+        case 'm':  // DATA 節流：序列埠阻塞會拖慢控制迴圈。
+            if (parseNumbers(tok, n, 1, 1, v)) {
+                if (v[0] < 0 || v[0] > 1000) {
+                    Serial.println(">> 錯誤：間隔需在 0 ~ 1000 ms 之間");
+                    break;
+                }
+                dataPeriodMs = (uint32_t)v[0];
+                Serial.printf(">> DATA 間隔 %u ms（%s）\n", dataPeriodMs,
+                              dataPeriodMs ? "節流中" : "每幀都送");
+            } else
+                Serial.printf(">> DATA 間隔 %u ms。格式：m 毫秒\n",
+                              dataPeriodMs);
+            break;
+
         case 's':
             printStatus();
             break;
@@ -869,7 +1048,14 @@ void loop() {
         float grid_dist[MAX_GRID_SIZE][MAX_GRID_SIZE] = {0};
         int valid_zone_count = 0;
 
-        if (irSensor.readData(grid_strength, grid_dist, valid_zone_count)) {
+        uint32_t tSensor = millis();
+        bool gotFrame =
+            irSensor.readData(grid_strength, grid_dist, valid_zone_count);
+        if (gotFrame) {
+            uint32_t sensorMs = millis() - tSensor;
+            if (sensorAvgMs == 0.0f) sensorAvgMs = (float)sensorMs;
+            sensorAvgMs += 0.05f * (sensorMs - sensorAvgMs);
+            if (sensorMs > sensorMaxMs) sensorMaxMs = sensorMs;
             BallEstimate est = estimator.estimate(grid_strength, grid_dist,
                                                   irSensor.current_grid_size,
                                                   valid_zone_count);
@@ -882,23 +1068,35 @@ void loop() {
                 irBall.y = est.yMm;
             }
 
-            // DATA 的球位置用格點座標（heatmap.py 繪圖用），無球為 -1。
-            float center_x = est.valid ? est.gridX : -1.0f;
-            float center_y = est.valid ? est.gridY : -1.0f;
+            // DATA 只是給 GUI 畫熱圖，節流以免阻塞 loop()；估測不受影響。
+            // 注意要用條件區塊而不是 return——return 會連同下面的控制更新一起
+            // 跳過，等於把控制頻率降到 DATA 的頻率。
+            static uint32_t lastData = 0;
+            uint32_t nowMs = millis();
+            if (!dataPeriodMs || nowMs - lastData >= dataPeriodMs) {
+                lastData = nowMs;
 
-            Serial.print("DATA,");
-            Serial.print(irSensor.current_grid_size);
-            Serial.print(",");
+                // DATA 的球位置用格點座標（heatmap.py 繪圖用），無球為 -1。
+                float center_x = est.valid ? est.gridX : -1.0f;
+                float center_y = est.valid ? est.gridY : -1.0f;
 
-            for (int y = 0; y < irSensor.current_grid_size; y++) {
-                for (int x = 0; x < irSensor.current_grid_size; x++) {
-                    Serial.print(grid_dist[y][x]);
-                    Serial.print(",");
+                Serial.print("DATA,");
+                Serial.print(irSensor.current_grid_size);
+                Serial.print(",");
+
+                for (int y = 0; y < irSensor.current_grid_size; y++) {
+                    for (int x = 0; x < irSensor.current_grid_size; x++) {
+                        Serial.print(grid_dist[y][x]);
+                        Serial.print(",");
+                    }
                 }
+                Serial.print(center_x);
+                Serial.print(",");
+                Serial.println(center_y);
+                uint32_t dms = millis() - nowMs;
+                if (dataAvgMs == 0.0f) dataAvgMs = (float)dms;
+                dataAvgMs += 0.1f * (dms - dataAvgMs);
             }
-            Serial.print(center_x);
-            Serial.print(",");
-            Serial.println(center_y);
         }
     }
 
@@ -907,6 +1105,11 @@ void loop() {
     uint32_t now = millis();
 
     if (now - lastControl < CONTROL_PERIOD_MS) return;
+
+    uint32_t period = now - lastControl;
+    if (loopAvgMs == 0.0f) loopAvgMs = (float)period;
+    loopAvgMs += 0.05f * (period - loopAvgMs);
+    if (period > loopMaxMs) loopMaxMs = period;
 
     float dt = (now - lastControl) / 1000.0f;
     lastControl = now;
@@ -936,6 +1139,78 @@ void loop() {
         // height 維持為基準高度，STAT 的高度欄位語意不變（GUI 的加減基準）。
         float h = height + hopAmplitude * sinf(TWO_PI * t / hopPeriodS);
         applyTilt(0.0f, 0.0f, h);
+        return;
+    }
+
+    // 閉迴路彈跳：垂直正弦自己鎖相（實測開迴路的 v 就能維持），回授只負責水平
+    // 不掉落與振幅調整，所以不需要抓個別撞擊時機。
+    if (mode == MODE_BOUNCE) {
+        // 以「球消失多久」量飛行時間；球在頂點會因角尺寸變小而偵測不到。
+        if (bounceWasPresent && !present) {
+            bounceLostMs = now;
+            // 「有球」的區間包住撞擊，取中點的相位當撞擊相位。接觸窗很短，
+            // 所以跨越 0/1 時把結束相位加 1 再平均即可。
+            if (bounceFoundMs) {
+                float end = bouncePhaseAcc;
+                if (end < bouncePhaseFound) end += 1.0f;
+                float ph = fmodf((bouncePhaseFound + end) * 0.5f, 1.0f);
+                bouncePhase = ph;
+                if (BOUNCE_PHASE_GAIN > 0.0f) {
+                    float err = ph - BOUNCE_PHASE_TARGET;
+                    while (err > 0.5f) err -= 1.0f;
+                    while (err < -0.5f) err += 1.0f;
+                    // 修正頻率而非跳相位：這個偏移維持到下次撞擊（約一個
+                    // 週期），累積出來的相位移正好是 -GAIN*err。
+                    bounceRateCorr =
+                        constrain(-BOUNCE_PHASE_GAIN * err, -BOUNCE_RATE_LIMIT,
+                                  BOUNCE_RATE_LIMIT);
+                }
+            }
+        } else if (!bounceWasPresent && present && bounceLostMs) {
+            uint32_t gap = now - bounceLostMs;
+            if (gap >= BOUNCE_MIN_FLIGHT_MS && gap <= BOUNCE_MAX_FLIGHT_MS) {
+                bounceFlightS = gap / 1000.0f;
+                // h = g * t^2 / 8（t 為完整飛行時間，此處為低估值）。
+                bounceHeightMm = 9810.0f * bounceFlightS * bounceFlightS / 8.0f;
+                if (bounceTargetMm > 0.0f) {
+                    bounceAmp +=
+                        BOUNCE_AMP_GAIN * (bounceTargetMm - bounceHeightMm);
+                    bounceAmp = constrain(bounceAmp, BOUNCE_AMP_MIN_MM,
+                                          BOUNCE_AMP_MAX_MM);
+                    // 振幅改變後仍要守住伺服角度範圍。
+                    while (bounceAmp > BOUNCE_AMP_MIN_MM &&
+                           (!poseWithinServoRange(0, 0, height - bounceAmp) ||
+                            !poseWithinServoRange(0, 0, height + bounceAmp)))
+                        bounceAmp -= 0.5f;
+                    // 撞擊事件才發生，不在每個控制週期。
+                    updateBounceTiltCap(bounceAmp);
+                }
+            }
+            bounceLostMs = 0;
+            bounceFoundMs = now;
+            bouncePhaseFound = bouncePhaseAcc;
+        }
+        if (present && !bounceFoundMs) {
+            bounceFoundMs = now;
+            bouncePhaseFound = bouncePhaseAcc;
+        }
+        bounceWasPresent = present;
+
+        // 水平：球不在視野時凍結傾角，而不是讓 PID 衰減——飛行中沒有新資訊，
+        // 衰減只會讓平台在球落下前跑掉。
+        if (present) {
+            // 用距上次更新的真實間隔，而不是控制週期。BalanceController 會把
+            // dt 夾在 0.005~0.1 秒，所以長飛行仍會被低估，但遠勝於用 20ms。
+            float pidDt = bouncePidMs ? (now - bouncePidMs) / 1000.0f : dt;
+            bouncePidMs = now;
+            pid.update(true, px, py, targetX, targetY, pidDt, bounceTiltCap,
+                       tiltTheta, tiltPhi);
+        }
+
+        bouncePhaseAcc += dt / bouncePeriodS * (1.0f + bounceRateCorr);
+        bouncePhaseAcc -= floorf(bouncePhaseAcc);
+        float h = height + bounceAmp * sinf(TWO_PI * bouncePhaseAcc);
+        applyTilt(tiltTheta, tiltPhi, h);
         return;
     }
 
