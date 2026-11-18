@@ -49,6 +49,8 @@ HEIGHT_MIN_MM = 20.0  # 後備值；實際見 STAT 的 h_min
 HEIGHT_MAX_MM = 100.0  # 後備值；實際見 STAT 的 h_max
 SWEEP_MIN_PERIOD_S = 0.5  # 開迴路圓錐掃掠的週期下限
 HOP_MIN_PERIOD_S = 0.2  # 開迴路高度振盪的週期下限
+ORBIT_MIN_PERIOD_S = 2.0  # 閉迴路球繞圈的週期下限
+ORBIT_MAX_RADIUS_MM = 40.0  # 閉迴路球繞圈的半徑上限
 MIN_SPAN_MM = 40  # 色階最小跨距，避免畫面接近平坦時對比被放大成雜訊
 
 # 欄位順序需與 src/main.cpp 的 printStat() 一致。
@@ -82,7 +84,14 @@ STAT_FIELDS = [
     "servo_max",
 ]
 # 位置對應韌體的 enum Mode，新模式只能附加在末端。
-MODE_NAMES = ["PID 自動平衡", "指定傾角", "直接角度", "圓錐掃掠", "高度振盪"]
+MODE_NAMES = [
+    "PID 自動平衡",
+    "指定傾角",
+    "直接角度",
+    "圓錐掃掠",
+    "高度振盪",
+    "球繞圈",
+]
 
 DESIGN_W, DESIGN_H = 1500, 760
 
@@ -256,7 +265,9 @@ class Telemetry:
                 "fps": fps,
                 "stat": dict(self.stat) if self.stat else None,
                 "stat_age": now - self.stat_time if self.stat else None,
-                "log": list(self.log)[-40:],
+                "log": list(
+                    self.log
+                ),  # 最多 200 筆（self.log 的 maxlen），供捲動回看。
                 "status": self.status,
                 "connected": self.connected,
             }
@@ -408,6 +419,7 @@ class DemoLink:
         self.off_until = 0.0
         self.raw = None  # 直接角度模式下的三顆伺服角度。
         self.sweep_theta, self.sweep_period, self.sweep_t0 = 5.0, 2.0, 0.0
+        self.orbit_radius, self.orbit_period, self.orbit_t0 = 20.0, 3.0, 0.0
         self.offsets = [0.0, -4.5, -4.0]
         self.thread = threading.Thread(target=self._run, daemon=True)
         tel.status, tel.connected = "DEMO 模擬資料", True
@@ -492,6 +504,19 @@ class DemoLink:
                         )
                     else:
                         self.tel.add_log(">> (demo) 錯誤：振幅或週期超出範圍")
+                elif c == "q" and len(p) == 3:
+                    radius, per = float(p[1]), float(p[2])
+                    if 0 < radius <= ORBIT_MAX_RADIUS_MM and per >= ORBIT_MIN_PERIOD_S:
+                        self.mode, self.raw = 5, None
+                        self.orbit_radius, self.orbit_period = radius, per
+                        self.orbit_t0 = time.time()
+                        self.ix = self.iy = 0.0
+                        self.tel.add_log(
+                            f">> 閉迴路繞圈：圓心 ({self.tx:.1f}, {self.ty:.1f})，"
+                            f"半徑 {radius:.1f} mm，每 {per:.2f} 秒一圈"
+                        )
+                    else:
+                        self.tel.add_log(">> (demo) 錯誤：半徑或週期超出範圍")
                 elif c == "d" and len(p) == 4:
                     v = [float(x) for x in p[1:]]
                     if all(SERVO_MIN_DEG <= a <= SERVO_MAX_DEG for a in v):
@@ -537,9 +562,15 @@ class DemoLink:
                 present = (
                     t0 > self.off_until and abs(self.bx) < 70 and abs(self.by) < 70
                 )
-                if self.mode == 0:
+                if self.mode in (0, 5):
+                    if self.mode == 5:
+                        ang = 2 * math.pi * (t0 - self.orbit_t0) / self.orbit_period
+                        tx = self.tx + self.orbit_radius * math.cos(ang)
+                        ty = self.ty + self.orbit_radius * math.sin(ang)
+                    else:
+                        tx, ty = self.tx, self.ty
                     if present:
-                        ex, ey = self.bx - self.tx, self.by - self.ty
+                        ex, ey = self.bx - tx, self.by - ty
                         self.ix = max(-300, min(300, self.ix + ex * dt))
                         self.iy = max(-300, min(300, self.iy + ey * dt))
                         ux = -(self.kp * ex + self.ki * self.ix + self.kd * self.vx)
@@ -1089,6 +1120,7 @@ HINTS = {
     "origin": "把目前三顆伺服的角度寫入為平台水平的原點（存進 ESP32，斷電保留）。請先把平台調到實際水平；需在「直接角度」模式且 PCA9685 有連線。為避免誤按，3 秒內要再按一次確認。\n指令：o",
     "origin_reset": "還原為 Config.h 的預設原點，並清除 ESP32 已儲存的值。\n指令：o r",
     "cmd": "直接輸入韌體指令，Enter 送出。例：s 顯示狀態、? 說明、c 1 90 1 0 校正伺服。快捷鍵 /",
+    "log": "滑鼠滾輪或拖曳右側拉桿可回看歷史訊息（最多 200 筆），輸入 ? 可印出完整指令說明。",
 }
 DEFAULT_HINT = (
     "滑鼠移到按鈕或數值上會顯示說明。\n"
@@ -1124,6 +1156,8 @@ class App:
         self.filt_step = 0.05
         self.target_step = 1.0
         self.origin_armed_until = 0.0
+        self.log_scroll = 0  # 從最新訊息往上捲動的行數，0 = 貼底顯示最新。
+        self.log_drag = False
         self.s = 1.0
 
     # --- 設定值 ---
@@ -1382,12 +1416,12 @@ class App:
 
     # --- 中間：熱圖 ---
     def center(self, d, x0, x1, h):
-        r, s = self.r, self.s
+        r, s, ui = self.r, self.s, self.ui
         n, stat = d["n"], d["stat"]
         r.text("VL53L7CX  距離圖", x0, 18 * s, 13 * s, DIM, "tl", bold=True)
-        log_h = 112 * s
+        min_log_h = 112 * s  # 熱圖可以縮到多小，留給下方韌體訊息卡片的保底高度。
         y0 = 46 * s
-        y1 = h - log_h - 54 * s
+        y1 = h - min_log_h - 54 * s
         side = max(min(x1 - x0, y1 - y0), 40)
         gx0, gy0 = x0 + (x1 - x0 - side) / 2, y0
         grid = d["dist"][:n, :n]
@@ -1484,14 +1518,61 @@ class App:
             "tc",
         )
 
-        ly0 = h - log_h - 14 * s
+        # 韌體訊息卡片的高度不再固定：往上長到色階（含 lo/hi 標籤與圖例文字）
+        # 正下方，一路填到視窗底部。熱圖受「寬度」限制而縮小時（視窗偏高），
+        # 色階下方常留有閒置空間，現在改成被這張卡片吃掉；熱圖受「高度」限制
+        # 長滿時則退回 min_log_h 這個保底值，不會壓到熱圖（y1 的計算已經用
+        # min_log_h 幫熱圖留好這段空間）。
+        log_top = ly + 34 * s  # 色階 (6) + lo/hi 與圖例文字列 (~15) + 間距 (14*s)
+        log_h = max(min_log_h - 22 * s, h - log_top - 14 * s)
+        ly0 = log_top
         r.rrect(x0, ly0, x1 - x0, log_h, 10 * s, CARD)
         r.text("韌體訊息", x0 + 14 * s, ly0 + 10 * s, 11.5 * s, DIM, "tl", bold=True)
         lh = 15 * s
-        rows = int((log_h - 36 * s) // lh)
-        for i, ln in enumerate(d["log"][-rows:] if rows > 0 else []):
+        body_y, body_h = ly0 + 30 * s, log_h - 38 * s
+        rows = max(0, int(body_h // lh))
+        log = d["log"]
+        total = len(log)
+        max_scroll = max(0, total - rows)
+
+        log_box = (x0, ly0, x1 - x0, log_h)
+        bar_w, bar_pad = 6 * s, 6 * s
+        track = (x1 - bar_pad - bar_w, body_y, bar_w, body_h)
+        hit = (track[0] - 8 * s, track[1], track[2] + 16 * s, track[3])
+
+        if ui.inside(log_box):
+            ui.hint = HINTS["log"]
+            self.log_scroll += int(ui.wheel) * 3
+        if max_scroll > 0:
+            thumb_h = min(body_h, max(24 * s, body_h * rows / total))
+            for c in ui.clicks:
+                if ui.inside(hit, c):
+                    self.log_drag = True
+            if self.log_drag and ui.down:
+                rel = (ui.mouse[1] - body_y - thumb_h / 2) / max(body_h - thumb_h, 1e-6)
+                self.log_scroll = round((1 - min(max(rel, 0.0), 1.0)) * max_scroll)
+            elif not ui.down:
+                self.log_drag = False
+            self.log_scroll = max(0, min(self.log_scroll, max_scroll))
+            thumb_y = body_y + (body_h - thumb_h) * (1 - self.log_scroll / max_scroll)
+            r.rrect(*track, bar_w / 2, HAIR)
+            r.rrect(
+                track[0],
+                thumb_y,
+                bar_w,
+                thumb_h,
+                bar_w / 2,
+                ACCENT if self.log_drag else CARD_HI,
+            )
+        else:
+            self.log_scroll = 0
+            self.log_drag = False
+
+        end = total - self.log_scroll
+        start = max(0, end - rows)
+        for i, ln in enumerate(log[start:end]):
             col = TEXT if ln.startswith(">>") else DIM
-            r.text(ln[:140], x0 + 14 * s, ly0 + 30 * s + i * lh, 11.5 * s, col, "tl")
+            r.text(ln[:140], x0 + 14 * s, body_y + i * lh, 11.5 * s, col, "tl")
 
     # --- 右側：控制 ---
     def right_panel(self, d, x, w, h):
