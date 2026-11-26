@@ -406,3 +406,28 @@ This is a PlatformIO project (`platformio.ini` at the repo root). Use the Platfo
     設計尺寸附近跟改之前的 112px 差不多（沒有突兀的跳變）、偏矮時退回保底值
     且沒有壓到熱圖。測試腳本放在暫存目錄，未納入 repo。**GUI 尚未實際操作
     驗證**，上傳後請用不同視窗長寬比例確認版面跟手感符合預期。
+- 2026-11-26：`q`（閉迴路球繞圈）指令的瞬時目標點在熱圖上畫出來，方便比對
+  球的實際位置跟指令希望它在哪。只改 `script/heatmap.py`，韌體沒動。
+  - 瞬時繞圈目標點只存在於 `main.cpp` 的 `loop()` 區域變數，不在 STAT 裡
+    （STAT 的 `tx/ty` 是圓心，不是會動的點），所以 GUI 自己依公式重算：新增
+    `App.note_orbit_cmd()`，在指令輸入框送出 `q 半徑 週期` 的那一刻（Enter
+    鍵的 handler）記下半徑/週期與 `time.time()`，跟韌體在指令被接受那一刻設
+    `orbitStartMs = millis()` 的時間點近似對齊；熱圖畫圖時若目前 STAT 的
+    `mode` 是球繞圈（5）就用同一個公式（`2π·t/period` 轉成繞圈偏移量）重算，
+    否則（PID 自動平衡模式，mode=0）直接畫靜態目標點 `tx/ty`。只能從指令輸入
+    框打 `q` 才會被記錄到；GUI 目前沒有專門的繞圈按鈕。
+  - 新增 `platform_mm_to_grid()`：`sensorToPlatform()`（旋轉/翻轉）與
+    `BallPositionEstimator::gridToMm()`（`tan(視角)×距離`）的反運算，把目標點
+    的平台座標 mm 換算回感測器格點座標畫在熱圖上；用目前量到的距離
+    （STAT 的 `dist`）當近似深度，跟估測器本身的近似程度一致。新增
+    `TOF_FOV_DEG`（需與 Config.h 一致，先前 GUI 沒有這個常數）。熱圖上畫一個
+    十字（ACCENT 色，跟球的圓圈/傾斜箭頭區分），落在視野外或距離無效
+    （`dist<=0`）時不畫。
+  - 驗證：`ruff format`/`ruff check`/`mypy` 通過；獨立腳本測試
+    `platform_mm_to_grid()` 對多組格點座標跟 `gridToMm`/`sensorToPlatform` 的
+    正向公式往返一致（誤差 < 1e-3 格）、距離無效回傳 `None`；
+    `note_orbit_cmd()` 對合法 `q`、超出範圍的 `q`、不相關指令（如 `g`）分別
+    驗證半徑/週期/時間有沒有被更新；重算瞬時目標點的完整邏輯（含時間偏移）
+    跑過一次確認落在視野內、不拋例外。測試腳本放在暫存目錄，未納入 repo。
+    **GUI 尚未實際操作驗證**（沒有顯示環境跑 pygame/OpenGL），上傳後請實際
+    下 `q` 指令確認十字會跟著轉、停在合理位置。

@@ -72,8 +72,8 @@ static constexpr float BALL_RISE_LOG10_8X8 = 0.6f;
 static constexpr float BALL_MIN_PEAK_LOG10_8X8 = 2.9f;
 static constexpr int BALL_MIN_ZONES_8X8 = 3;
 static constexpr float BALL_SPIKE_JUMP_LOG10_4X4 = 1.0f;
-static constexpr float BALL_RISE_LOG10_4X4 = 0.6f;
-static constexpr float BALL_MIN_PEAK_LOG10_4X4 = 2.7f;
+static constexpr float BALL_RISE_LOG10_4X4 = 0.0f;
+static constexpr float BALL_MIN_PEAK_LOG10_4X4 = 2.3f;
 static constexpr int BALL_MIN_ZONES_4X4 = 2;
 
 // 感測器座標轉平台座標：先翻轉，再逆時針旋轉。

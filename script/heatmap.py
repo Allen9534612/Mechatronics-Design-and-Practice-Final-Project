@@ -45,6 +45,7 @@ SERVO_CHANNELS = (0, 1, 2)
 SENSOR_ROTATION_DEG = 0.0
 SENSOR_FLIP_X = True
 SENSOR_FLIP_Y = False
+TOF_FOV_DEG = 60.0  # 需與 Config.h 的 TOF_FOV_DEG 一致，用來把目標點 mm 換算回格點。
 HEIGHT_MIN_MM = 20.0  # 後備值；實際見 STAT 的 h_min
 HEIGHT_MAX_MM = 100.0  # 後備值；實際見 STAT 的 h_max
 SWEEP_MIN_PERIOD_S = 0.5  # 開迴路圓錐掃掠的週期下限
@@ -1098,6 +1099,27 @@ def dist_color(d, lo, hi):
     )
 
 
+def platform_mm_to_grid(px, py, dist_mm, n):
+    """把平台座標（mm，盤面中心原點）換算回感測器格點座標，供熱圖畫目標點。
+
+    是 src/main.cpp 的 sensorToPlatform() 與 lib/BallPositionEstimator 的
+    gridToMm() 的反運算：先轉回感測器座標（反旋轉、反翻轉），再用目前量到的
+    距離把 mm 換算成格點（跟估測器一樣假設整顆球在同一個距離平面上，只是近似）。
+    距離無效時回傳 None。
+    """
+    if dist_mm is None or dist_mm <= 0 or n <= 0:
+        return None
+    r = math.radians(SENSOR_ROTATION_DEG)
+    fx = px * math.cos(r) + py * math.sin(r)
+    fy = -px * math.sin(r) + py * math.cos(r)
+    sx = -fx if SENSOR_FLIP_X else fx
+    sy = -fy if SENSOR_FLIP_Y else fy
+    pitch_deg = TOF_FOV_DEG / n
+    gx = math.degrees(math.atan2(sx, dist_mm)) / pitch_deg + (n - 1) / 2.0
+    gy = math.degrees(math.atan2(sy, dist_mm)) / pitch_deg + (n - 1) / 2.0
+    return gx, gy
+
+
 HINTS = {
     "res4": "4×4 解析度，60 Hz。更新快、格子少，適合高速控制。\n指令：4（快捷鍵 4）",
     "res8": "8×8 解析度，15 Hz。格子多、位置較精細，但更新慢。\n指令：8（快捷鍵 8）",
@@ -1160,6 +1182,10 @@ class App:
         self.log_scroll = 0  # 從最新訊息往上捲動的行數，0 = 貼底顯示最新。
         self.log_drag = False
         self.s = 1.0
+        # 閉迴路球繞圈（q 指令）瞬時目標點：韌體不會把這個算出來的點送回
+        # STAT（只有圓心 tx/ty），所以 GUI 自己依送出的半徑/週期/時間重算，
+        # 畫在熱圖上給使用者對照。orbit_t0 為 None 表示還沒送過 q。
+        self.orbit_radius, self.orbit_period, self.orbit_t0 = 20.0, 3.0, None
 
     # --- 設定值 ---
     def limit(self, key, stat, fallback):
@@ -1202,6 +1228,24 @@ class App:
         self.set_ov("ty", ty)
         self.link.send(f"g {tx:.1f} {ty:.1f}")
 
+    def note_orbit_cmd(self, cmd):
+        """從指令輸入框打的 q 指令記下半徑/週期/起始時間，用來在熱圖畫瞬時目標點。
+
+        韌體的 orbitStartMs 是在指令被接受那一刻用 millis() 設的，這裡用送出
+        當下的 time.time() 近似；指令若被韌體拒絕（超出範圍），畫出來的目標點
+        會跟實際行為不符，但模式顯示仍以 STAT 的 mode 為準，不會在非繞圈模式
+        下誤畫。
+        """
+        p = cmd.split()
+        if len(p) == 3 and p[0].lower() == "q":
+            try:
+                radius, period = float(p[1]), float(p[2])
+            except ValueError:
+                return
+            if 0 < radius <= ORBIT_MAX_RADIUS_MM and period >= ORBIT_MIN_PERIOD_S:
+                self.orbit_radius, self.orbit_period = radius, period
+                self.orbit_t0 = time.time()
+
     # --- 事件 ---
     def handle_events(self):
         ui = self.ui
@@ -1228,8 +1272,10 @@ class App:
     def handle_key(self, e):
         if self.cmd_focus:
             if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                if self.cmd_text.strip():
-                    self.link.send(self.cmd_text.strip())
+                cmd = self.cmd_text.strip()
+                if cmd:
+                    self.note_orbit_cmd(cmd)
+                    self.link.send(cmd)
                 self.cmd_text, self.cmd_focus = "", False
             elif e.key == pygame.K_ESCAPE:
                 self.cmd_text, self.cmd_focus = "", False
@@ -1483,6 +1529,21 @@ class App:
                 bx = gx0 + (d["cx"] + 0.5) * cell
                 by = gy0 + (d["cy"] + 0.5) * cell
                 r.ring(bx, by, max(cell * 0.17, 7 * s), 3 * s, TEXT)
+            if stat and int(stat["mode"]) in (0, 5) and stat.get("dist", 0) > 0:
+                tgx, tgy = stat["tx"], stat["ty"]
+                if int(stat["mode"]) == 5 and self.orbit_t0 is not None:
+                    t = time.time() - self.orbit_t0
+                    ang = 2 * math.pi * t / max(self.orbit_period, 1e-6)
+                    tgx += self.orbit_radius * math.cos(ang)
+                    tgy += self.orbit_radius * math.sin(ang)
+                g = platform_mm_to_grid(tgx, tgy, stat["dist"], n)
+                if g and -0.5 <= g[0] <= n - 0.5 and -0.5 <= g[1] <= n - 0.5:
+                    tx_px = gx0 + (g[0] + 0.5) * cell
+                    ty_px = gy0 + (g[1] + 0.5) * cell
+                    rr = max(cell * 0.14, 6 * s)
+                    r.ring(tx_px, ty_px, rr, 2.2 * s, ACCENT, 0.9)
+                    r.line(tx_px - rr, ty_px, tx_px + rr, ty_px, 1.4 * s, ACCENT, 0.9)
+                    r.line(tx_px, ty_px - rr, tx_px, ty_px + rr, 1.4 * s, ACCENT, 0.9)
         else:
             r.rrect(gx0, gy0, side, side, 10 * s, CARD)
             r.text("等待資料…", gx0 + side / 2, gy0 + side / 2, 14 * s, DIM, "mc")
@@ -1511,7 +1572,7 @@ class App:
         r.text(f"{lo:.0f} mm", gx0, ly + 10 * s, 11 * s, DIM, "tl")
         r.text(f"{hi:.0f} mm", gx0 + side, ly + 10 * s, 11 * s, DIM, "tr")
         r.text(
-            "圓圈：球　箭頭：平台下傾方向",
+            "圓圈：球　箭頭：平台下傾方向　十字：指令目標點",
             gx0 + side / 2,
             ly + 10 * s,
             11 * s,
