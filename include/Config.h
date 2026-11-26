@@ -283,8 +283,8 @@ static constexpr float ORBIT_FF_GAIN = 1.0f;
 //       跟瞬時指令角度的差，乘上半徑換成弧長誤差，推切線方向，落後就加速、
 //       超前就減速），兩個方向各自獨立的增益，比模式 0 的單一向量更好調
 //       （模式 0 相位落後較多時誤差向量會偏掉，變成同時在修半徑和相位）。
-//       徑向增益沿用 pid.kp，切向增益見 ORBIT_TANGENT_KP_DEFAULT（可由 q 指
-//       令第 5 個參數覆寫）。
+//       徑向、切向增益分別見 ORBIT_RADIAL_KP_DEFAULT／ORBIT_TANGENT_KP_DEFAULT
+//       （可由 q 指令第 5、6 個參數覆寫）。
 //
 // 三種模式都疊加同一份前饋（present 時才加，見 main.cpp），不是「要不要前
 // 饋」的二選一；把 q 的第 4 個參數（前饋增益）設成 0 就能測「純閉迴路、沒
@@ -295,9 +295,22 @@ static constexpr float ORBIT_FF_GAIN = 1.0f;
 // 小很多、更穩。
 static constexpr int ORBIT_FEEDBACK_MODE_DEFAULT = 0;
 
-// 模式 2 的切向增益（度/mm，可由 q 指令第 5 個參數覆寫）。預設沿用跟徑向
-// 相同的 pid.kp，純粹圖個合理起始值，兩個方向的增益本來就該分開調。
+// 模式 1/2 的徑向增益、模式 2 的切向增益（度/mm，可由 q 指令第 5、6 個參數
+// 覆寫）。預設都沿用 pid.kp 只是圖個合理起始值——實測半徑 20mm/週期 5s 時，
+// 球會繞著轉但徑向守不住（跑到 60mm 外、飛出視野），tilt 全程只有個位數度
+// （遠低於 maxTilt），代表不是飽和問題，是徑向增益對「動態守住半徑」這個
+// 任務太弱（pid.kp 原本是為了「靜止點收斂」調的，球持續繞圈帶著動量，需要
+// 的修正力顯然要更大）。兩個方向原本就該分開調，不要再共用 pid.kp／跟著
+// p 指令的全域 kp 一起變動。
+static constexpr float ORBIT_RADIAL_KP_DEFAULT = PID_KP;
 static constexpr float ORBIT_TANGENT_KP_DEFAULT = PID_KP;
+
+// 模式 1/2 徑向的阻尼（度/(mm/s)，可由 q 指令第 7 個參數覆寫）。徑向這條軸
+// 跟 MODE_BALL 一樣是「傾角 -> 加速度」的雙重積分系統，純 P 沒有阻尼只會
+// 震盪/過衝——實測把 ORBIT_RADIAL_KP_DEFAULT 從 0.12 調到 0.35 後，球從
+// 中心衝出到 24.5mm 外飛出視野只花 0.7 秒，調大增益反而更快飛出去，證實
+// 問題是缺阻尼不是增益不夠。預設沿用 PID_KD（單位相同），需要上機驗證。
+static constexpr float ORBIT_RADIAL_KD_DEFAULT = PID_KD;
 
 // 球到圓心距離小於這個值時暫停模式 1/2 的修正、只留前饋：角度（以及半徑
 // 方向）的量測誤差 ≈ atan(位置噪訊 / 距離)，距離越小誤差越大，接近圓心時

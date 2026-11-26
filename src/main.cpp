@@ -68,8 +68,15 @@ float orbitPeriodS = ORBIT_PERIOD_S;
 uint32_t orbitStartMs = 0;
 int orbitFeedbackMode = ORBIT_FEEDBACK_MODE_DEFAULT;
 float orbitFfGain = ORBIT_FF_GAIN;
+float orbitRadialKp = ORBIT_RADIAL_KP_DEFAULT;  // 模式 1/2 的徑向增益，度/mm。
+float orbitRadialKd =
+    ORBIT_RADIAL_KD_DEFAULT;  // 模式 1/2 的徑向阻尼，度/(mm/s)。
 float orbitTangentKp = ORBIT_TANGENT_KP_DEFAULT;  // 模式 2 的切向增益，度/mm。
 float orbitRadialOutX = 0.0f, orbitRadialOutY = 0.0f;
+// 模式 1/2 的球相對圓心速度估計（濾波微分，供徑向阻尼項使用）。
+float orbitPrevBx = 0.0f, orbitPrevBy = 0.0f;
+float orbitDVx = 0.0f, orbitDVy = 0.0f;
+bool orbitHasPrevB = false;
 
 // 閉迴路彈跳。彈跳高度由球「偵測到→消失→再偵測到」的間隔推估：球飛高後角
 // 尺寸變小、訊號變弱會偵測不到，所以不追蹤頂點，改量飛行時間（h = g*t^2/8）。
@@ -367,9 +374,9 @@ void printHelp() {
         "  v 振幅 週期   開迴路高度振盪（不讀球位置），平台上下動，例：v 5 "
         "0.5");
     Serial.println(
-        "  q 半徑 週期 [模式0/1/2] [前饋增益] [切向增益]   閉迴路球繞圈：前"
-        "饋向心傾角+修正，模式0=向量誤差 1=半徑誤差 2=極座標(半徑+切向相"
-        "位)，例：q 20 3");
+        "  q 半徑 週期 [模式0/1/2] [前饋增益] [徑向P增益] [切向增益] [徑向D"
+        "增益]   閉迴路球繞圈：前饋向心傾角+修正，模式0=向量誤差 1=半徑誤"
+        "差 2=極座標(半徑+切向相位)，例：q 20 3");
     Serial.println(
         "  a a1 a2 a3   設定三顆伺服角度（會加上各自 offset，a 90 90 90 = "
         "水平）");
@@ -421,9 +428,9 @@ void printStatus() {
     if (mode == MODE_ORBIT)
         Serial.printf(
             "繞圈: 圓心 (%.1f, %.1f)，半徑 %.1f mm，週期 %.2f 秒，修正模式 "
-            "%d，前饋增益 %.2f，切向增益 %.4f\n",
+            "%d，前饋增益 %.2f，徑向增益 %.4f/%.4f（P/D），切向增益 %.4f\n",
             targetX, targetY, orbitRadius, orbitPeriodS, orbitFeedbackMode,
-            orbitFfGain, orbitTangentKp);
+            orbitFfGain, orbitRadialKp, orbitRadialKd, orbitTangentKp);
     Serial.printf("控制週期: 平均 %.1f ms 最大 %u ms（目標 %d ms）%s\n",
                   loopAvgMs, loopMaxMs, CONTROL_PERIOD_MS,
                   loopMaxMs > 2 * CONTROL_PERIOD_MS ? "  <-- 偏慢" : "");
@@ -539,8 +546,9 @@ void setBall(float x, float y) {
 }
 
 void handleCommand(char* line) {
-    char* tok[6];
-    int n = splitTokens(line, tok, 6);
+    char*
+        tok[8];  // q 指令現在最多 8 個 token（指令字+半徑+週期+5個可選參數）。
+    int n = splitTokens(line, tok, 8);
     if (n == 0) return;
 
     float v[4];
@@ -735,8 +743,12 @@ void handleCommand(char* line) {
                 }
                 float ffg;
                 if (n >= 5 && parseNumber(tok[4], ffg)) orbitFfGain = ffg;
+                float rkp;
+                if (n >= 6 && parseNumber(tok[5], rkp)) orbitRadialKp = rkp;
                 float tkp;
-                if (n >= 6 && parseNumber(tok[5], tkp)) orbitTangentKp = tkp;
+                if (n >= 7 && parseNumber(tok[6], tkp)) orbitTangentKp = tkp;
+                float rkd;
+                if (n >= 8 && parseNumber(tok[7], rkd)) orbitRadialKd = rkd;
                 mode = MODE_ORBIT;
                 manualBall.present = false;
                 orbitRadius = v[0];
@@ -744,16 +756,19 @@ void handleCommand(char* line) {
                 orbitStartMs = millis();
                 pid.reset();
                 orbitRadialOutX = orbitRadialOutY = 0.0f;
+                orbitDVx = orbitDVy = 0.0f;
+                orbitHasPrevB = false;
                 Serial.printf(
                     ">> 閉迴路繞圈：圓心 (%.1f, %.1f)，半徑 %.1f mm，每 %.2f "
-                    "秒一圈，修正模式 %d，前饋增益 %.2f，切向增益 %.4f（l 回"
-                    "水平、g 可移動圓心）\n",
+                    "秒一圈，修正模式 %d，前饋增益 %.2f，徑向增益 %.4f/%.4f"
+                    "（P/D），切向增益 %.4f（l 回水平、g 可移動圓心）\n",
                     targetX, targetY, orbitRadius, orbitPeriodS,
-                    orbitFeedbackMode, orbitFfGain, orbitTangentKp);
+                    orbitFeedbackMode, orbitFfGain, orbitRadialKp,
+                    orbitRadialKd, orbitTangentKp);
             } else
                 Serial.println(
-                    ">> 格式：q 半徑 週期 [修正模式0/1/2] [前饋增益] [切向"
-                    "增益]");
+                    ">> 格式：q 半徑 週期 [修正模式0/1/2] [前饋增益] [徑向P"
+                    "增益] [切向增益] [徑向D增益]");
             break;
 
         case 'j':  // 閉迴路彈跳：垂直正弦 + 水平 PID。
@@ -1280,6 +1295,27 @@ void loop() {
         if (present) {
             float bx = px - targetX, by = py - targetY;
             float dist = hypotf(bx, by);
+
+            // 球相對圓心的速度（量測值的濾波微分，不是目標值的微分，跟
+            // BalanceController 的 dX/dY 一樣避免移動目標點時暴衝）。徑向
+            // 這條軸是跟 MODE_BALL 一樣的「傾角 -> 加速度」雙重積分系統，
+            // 純 P 沒有阻尼只會震盪/過衝（實測把 kp 從 0.12 調到 0.35 後，
+            // 球從中心衝到 24.5mm 外飛出視野只花 0.7 秒，調大增益反而更快
+            // 飛出去，證實不是增益不夠、是缺阻尼），要加微分項才穩得住。
+            float dtc = constrain(dt, 0.005f, 0.1f);
+            float vx = 0.0f, vy = 0.0f;
+            if (orbitHasPrevB) {
+                float rawVx = (bx - orbitPrevBx) / dtc;
+                float rawVy = (by - orbitPrevBy) / dtc;
+                orbitDVx = pid.dAlpha * rawVx + (1 - pid.dAlpha) * orbitDVx;
+                orbitDVy = pid.dAlpha * rawVy + (1 - pid.dAlpha) * orbitDVy;
+                vx = orbitDVx;
+                vy = orbitDVy;
+            }
+            orbitPrevBx = bx;
+            orbitPrevBy = by;
+            orbitHasPrevB = true;
+
             float corrX = 0.0f, corrY = 0.0f;
             // 球太靠近圓心時，角度（以及半徑方向）的量測被噪訊主導
             // （誤差 ≈ atan(位置噪訊/距離)，距離越小誤差越大），暫停修正、
@@ -1287,8 +1323,11 @@ void loop() {
             if (dist > ORBIT_CENTER_DEADBAND_MM) {
                 float rHatX = bx / dist, rHatY = by / dist;
                 float errR = dist - orbitRadius;  // > 0：太遠，往圓心推。
-                corrX = -pid.kp * errR * rHatX;
-                corrY = -pid.kp * errR * rHatY;
+                float vRadial = vx * rHatX + vy * rHatY;  // > 0：正在往外跑。
+                corrX = -orbitRadialKp * errR * rHatX -
+                        orbitRadialKd * vRadial * rHatX;
+                corrY = -orbitRadialKp * errR * rHatY -
+                        orbitRadialKd * vRadial * rHatY;
 
                 if (orbitFeedbackMode == 2) {
                     // 相位誤差：球目前角度 vs. 瞬時指令角度，落後就沿切線
@@ -1308,7 +1347,10 @@ void loop() {
             orbitRadialOutY = pid.outputAlpha * (ffY + corrY) +
                               (1 - pid.outputAlpha) * orbitRadialOutY;
         } else {
-            // 球不在視野內：跟 MODE_BALL 一樣衰減回水平，不要盲開。
+            // 球不在視野內：跟 MODE_BALL 一樣衰減回水平，不要盲開；微分項的
+            // 「上一次量測」也要清掉，避免球再出現時把跨越消失區間的位移
+            // 當成瞬間速度算進去。
+            orbitHasPrevB = false;
             orbitRadialOutX *= 0.9f;
             orbitRadialOutY *= 0.9f;
         }
