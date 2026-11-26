@@ -253,3 +253,30 @@ static constexpr float ORBIT_RADIUS_MM = 20.0f;
 static constexpr float ORBIT_PERIOD_S = 3.0f;
 static constexpr float ORBIT_MIN_PERIOD_S = 2.0f;
 static constexpr float ORBIT_MAX_RADIUS_MM = 40.0f;
+
+// 重力加速度 (mm/s^2)，g = 9.81 m/s^2。供繞圈前饋與彈跳高度估算共用。
+static constexpr float GRAVITY_MM_S2 = 9810.0f;
+
+// 繞圈前饋：純閉迴路追一個跑動目標點，P 項需要持續的位置誤差才能撐住非零
+// 加速度，容易跟不上、過衝（實測半徑 30mm/週期 3s 時球衝到離圓心 100mm 以
+// 上）。改成把「半徑/週期」直接換算成理論上維持等速圓周運動所需的向心傾
+// 角——方向隨角度旋轉、大小固定，像是前饋版的 w 指令——再疊加閉迴路修正，
+// 閉迴路只需要修正前饋算錯的殘差。
+//
+// 模型：球視為沿斜面無滑動滾動的薄殼空心球（乒乓球，I = 2/3 m r^2），
+// a = g sinθ / (1 + I/(m r^2)) = (3/5) g sinθ。等速圓周運動需要的向心加速
+// 度 = ω^2 r（ω = 2π/週期），方向永遠指向圓心，所以前饋傾角
+// = asin(ω^2 r / (ORBIT_FF_GRAVITY_SCALE * g))，再乘上 ORBIT_FF_GAIN（模型
+// 跟實際不符時整體校正用，1.0 = 不額外縮放）。兩者都可用 q 指令的第 4 個
+// 參數覆寫 FF_GAIN（見 main.cpp 的 'q' 指令）。
+static constexpr float ORBIT_FF_GRAVITY_SCALE = 0.6f;  // 3/5，薄殼球
+static constexpr float ORBIT_FF_GAIN = 1.0f;
+
+// 閉迴路修正量的算法（q 指令第 3 個參數選，預設 0；兩種都沒有實機驗證過，
+// 先都做出來上機比較再決定）：
+//   0 = 向量誤差：球與「瞬時指令位置」的誤差向量，跟前饋疊加之前的做法
+//       相同，沿用既有 BalanceController（kp/ki/kd 皆為 p 指令可調的 pid.*）。
+//   1 = 半徑誤差：球到圓心的距離 - 半徑（純量），方向沿半徑方向（偏遠就往
+//       圓心推、偏近就往外推），完全不管球目前在圓周上的相位——相位全部交
+//       給前饋維持。只有 P，增益沿用 pid.kp，輸出套 pid.outputAlpha 濾波。
+static constexpr int ORBIT_FEEDBACK_MODE_DEFAULT = 0;

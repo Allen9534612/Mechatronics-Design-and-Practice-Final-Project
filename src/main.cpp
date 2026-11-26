@@ -59,10 +59,16 @@ float hopPeriodS = HOP_PERIOD_S;
 uint32_t sweepStartMs = 0;
 
 // 閉迴路球繞圈（q 指令）的參數與起始時刻；圓心就是 targetX/targetY，可用
-// g 指令隨時移動（即使繞圈中也可以）。
+// g 指令隨時移動（即使繞圈中也可以）。orbitFeedbackMode/orbitFfGain 可由 q
+// 指令的第 3、4 個參數覆寫，見 Config.h 的 ORBIT_FEEDBACK_MODE_DEFAULT。
+// orbitRadialOutX/Y 是模式 1（半徑誤差）自己的輸出濾波狀態，不經過
+// BalanceController。
 float orbitRadius = ORBIT_RADIUS_MM;
 float orbitPeriodS = ORBIT_PERIOD_S;
 uint32_t orbitStartMs = 0;
+int orbitFeedbackMode = ORBIT_FEEDBACK_MODE_DEFAULT;
+float orbitFfGain = ORBIT_FF_GAIN;
+float orbitRadialOutX = 0.0f, orbitRadialOutY = 0.0f;
 
 // 閉迴路彈跳。彈跳高度由球「偵測到→消失→再偵測到」的間隔推估：球飛高後角
 // 尺寸變小、訊號變弱會偵測不到，所以不追蹤頂點，改量飛行時間（h = g*t^2/8）。
@@ -360,8 +366,8 @@ void printHelp() {
         "  v 振幅 週期   開迴路高度振盪（不讀球位置），平台上下動，例：v 5 "
         "0.5");
     Serial.println(
-        "  q 半徑 週期   閉迴路球繞圈：PID 的目標點繞目前目標點轉一圈，例：q "
-        "20 3");
+        "  q 半徑 週期 [模式0/1] [前饋增益]   閉迴路球繞圈：前饋向心傾角+"
+        "修正，模式0=向量誤差 1=半徑誤差，例：q 20 3");
     Serial.println(
         "  a a1 a2 a3   設定三顆伺服角度（會加上各自 offset，a 90 90 90 = "
         "水平）");
@@ -411,8 +417,11 @@ void printStatus() {
             Serial.println("鎖相: 尚未量到撞擊相位");
     }
     if (mode == MODE_ORBIT)
-        Serial.printf("繞圈: 圓心 (%.1f, %.1f)，半徑 %.1f mm，週期 %.2f 秒\n",
-                      targetX, targetY, orbitRadius, orbitPeriodS);
+        Serial.printf(
+            "繞圈: 圓心 (%.1f, %.1f)，半徑 %.1f mm，週期 %.2f 秒，修正模式 "
+            "%d，前饋增益 %.2f\n",
+            targetX, targetY, orbitRadius, orbitPeriodS, orbitFeedbackMode,
+            orbitFfGain);
     Serial.printf("控制週期: 平均 %.1f ms 最大 %u ms（目標 %d ms）%s\n",
                   loopAvgMs, loopMaxMs, CONTROL_PERIOD_MS,
                   loopMaxMs > 2 * CONTROL_PERIOD_MS ? "  <-- 偏慢" : "");
@@ -691,7 +700,7 @@ void handleCommand(char* line) {
                 Serial.println(">> 格式：v 振幅 週期（秒）");
             break;
 
-        case 'q':  // 閉迴路球繞圈：沿用 PID，目標點繞目前目標點轉動。
+        case 'q':  // 閉迴路球繞圈：前饋（理論向心傾角）+ 閉迴路修正。
             if (!USE_IR_SENSOR) {
                 Serial.println(
                     ">> 手動模式沒有連續的球位置回饋，q 指令只在紅外線模式下"
@@ -711,18 +720,34 @@ void handleCommand(char* line) {
                         ORBIT_MIN_PERIOD_S);
                     break;
                 }
+                float fbMode;
+                if (n >= 4) {
+                    if (!parseNumber(tok[3], fbMode) ||
+                        (fbMode != 0.0f && fbMode != 1.0f)) {
+                        Serial.println(
+                            ">> 錯誤：模式只能是 0（向量誤差）或 1（半徑"
+                            "誤差）");
+                        break;
+                    }
+                    orbitFeedbackMode = (int)fbMode;
+                }
+                float ffg;
+                if (n >= 5 && parseNumber(tok[4], ffg)) orbitFfGain = ffg;
                 mode = MODE_ORBIT;
                 manualBall.present = false;
                 orbitRadius = v[0];
                 orbitPeriodS = v[1];
                 orbitStartMs = millis();
                 pid.reset();
+                orbitRadialOutX = orbitRadialOutY = 0.0f;
                 Serial.printf(
                     ">> 閉迴路繞圈：圓心 (%.1f, %.1f)，半徑 %.1f mm，每 %.2f "
-                    "秒一圈（l 回水平、g 可移動圓心）\n",
-                    targetX, targetY, orbitRadius, orbitPeriodS);
+                    "秒一圈，修正模式 %d，前饋增益 %.2f（l 回水平、g 可移動"
+                    "圓心）\n",
+                    targetX, targetY, orbitRadius, orbitPeriodS,
+                    orbitFeedbackMode, orbitFfGain);
             } else
-                Serial.println(">> 格式：q 半徑 週期（秒）");
+                Serial.println(">> 格式：q 半徑 週期 [修正模式0/1] [前饋增益]");
             break;
 
         case 'j':  // 閉迴路彈跳：垂直正弦 + 水平 PID。
@@ -1171,7 +1196,8 @@ void loop() {
             if (gap >= BOUNCE_MIN_FLIGHT_MS && gap <= BOUNCE_MAX_FLIGHT_MS) {
                 bounceFlightS = gap / 1000.0f;
                 // h = g * t^2 / 8（t 為完整飛行時間，此處為低估值）。
-                bounceHeightMm = 9810.0f * bounceFlightS * bounceFlightS / 8.0f;
+                bounceHeightMm =
+                    GRAVITY_MM_S2 * bounceFlightS * bounceFlightS / 8.0f;
                 if (bounceTargetMm > 0.0f) {
                     bounceAmp +=
                         BOUNCE_AMP_GAIN * (bounceTargetMm - bounceHeightMm);
@@ -1217,19 +1243,75 @@ void loop() {
     // 手動模式與 t / l / a 之後都不跑 PID，輸入 r 恢復。
     if (!USE_IR_SENSOR || (mode != MODE_BALL && mode != MODE_ORBIT)) return;
 
-    // MODE_ORBIT 跟 MODE_BALL 共用同一個 PID：目標點只是從固定的
-    // (targetX, targetY) 換成繞著它轉動的點，圓心仍可用 g 指令移動。
-    // BalanceController 的微分項取球的量測值變化（不是目標點變化），所以移動
-    // 目標點不會造成微分項暴衝；控制週期沒變，延遲只來自原本就有的
-    // CONTROL_PERIOD_MS，沒有額外引入大延遲。
+    // MODE_ORBIT 前饋：把半徑/週期換算成等速圓周運動需要的向心傾角（方向隨
+    // 角度旋轉、大小固定，像前饋版的 w 指令），閉迴路只需修正前饋的殘差，不
+    // 必靠持續的位置誤差去撐住非零加速度（純 P 追一個跑動目標點本來就需要
+    // 滯後的誤差才有輸出，容易跟不上、過衝）。
     float tx = targetX, ty = targetY;
+    float ffX = 0.0f, ffY = 0.0f;
     if (mode == MODE_ORBIT) {
         float t = (now - orbitStartMs) / 1000.0f;
         float ang = TWO_PI * t / orbitPeriodS;
-        tx += orbitRadius * cosf(ang);
-        ty += orbitRadius * sinf(ang);
+        float c = cosf(ang), s = sinf(ang);
+        tx += orbitRadius * c;
+        ty += orbitRadius * s;
+
+        float omega = TWO_PI / orbitPeriodS;
+        float aReq = omega * omega * orbitRadius;  // mm/s^2，等速圓周運動需要
+                                                   // 的向心加速度，指向圓心。
+        float ffDeg = degrees(asinf(constrain(
+            aReq / (ORBIT_FF_GRAVITY_SCALE * GRAVITY_MM_S2), -1.0f, 1.0f)));
+        ffDeg *= orbitFfGain;
+        ffX = -ffDeg * c;  // 向心方向：從圓周上該點指向圓心。
+        ffY = -ffDeg * s;
     }
 
+    if (mode == MODE_ORBIT && orbitFeedbackMode == 1) {
+        // 半徑誤差：只修正球到圓心的距離，角度/相位全交給前饋維持。
+        if (present) {
+            float bx = px - targetX, by = py - targetY;
+            float dist = hypotf(bx, by);
+            float corrX = 0.0f, corrY = 0.0f;
+            if (dist > 1e-3f) {
+                float err = dist - orbitRadius;  // > 0：太遠，往圓心推。
+                corrX = -pid.kp * err * bx / dist;
+                corrY = -pid.kp * err * by / dist;
+            }
+            orbitRadialOutX = pid.outputAlpha * (ffX + corrX) +
+                              (1 - pid.outputAlpha) * orbitRadialOutX;
+            orbitRadialOutY = pid.outputAlpha * (ffY + corrY) +
+                              (1 - pid.outputAlpha) * orbitRadialOutY;
+        } else {
+            // 球不在視野內：跟 MODE_BALL 一樣衰減回水平，不要盲開。
+            orbitRadialOutX *= 0.9f;
+            orbitRadialOutY *= 0.9f;
+        }
+        float mag = hypotf(orbitRadialOutX, orbitRadialOutY);
+        tiltTheta = min(mag, maxTilt);
+        tiltPhi = (mag < 1e-4f)
+                      ? 0.0f
+                      : degrees(atan2f(orbitRadialOutY, orbitRadialOutX));
+        if (tiltPhi < 0) tiltPhi += 360.0f;
+        applyTilt(tiltTheta, tiltPhi);
+        return;
+    }
+
+    // MODE_BALL，或 MODE_ORBIT 的修正模式 0：向量誤差，沿用既有 PID。
     pid.update(present, px, py, tx, ty, dt, maxTilt, tiltTheta, tiltPhi);
+
+    if (mode == MODE_ORBIT) {
+        // PID 輸出已經被夾在 maxTilt，還原成向量疊加前饋後重新夾限。沒球時
+        // 不疊加前饋——否則球離開視野後前饋還是會像 w 指令一樣繼續盲轉，跟
+        // MODE_BALL／模式 1 沒球時衰減回水平的慣例不一致，只靠 PID 自己的
+        // 衰減（present=false 時已經在 BalanceController 內處理）收斂到 0。
+        float rad = radians(tiltPhi);
+        float sx = tiltTheta * cosf(rad) + (present ? ffX : 0.0f);
+        float sy = tiltTheta * sinf(rad) + (present ? ffY : 0.0f);
+        float mag = hypotf(sx, sy);
+        tiltTheta = min(mag, maxTilt);
+        tiltPhi = (mag < 1e-4f) ? 0.0f : degrees(atan2f(sy, sx));
+        if (tiltPhi < 0) tiltPhi += 360.0f;
+    }
+
     applyTilt(tiltTheta, tiltPhi);
 }
